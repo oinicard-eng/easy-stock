@@ -477,6 +477,11 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	if snapshot.Equity <= 0 {
 		return fail("账户总资产异常，无法计算仓位")
 	}
+	// 每次判断前先量一次净值。手动模式下没有循环，若只在自动循环里观察，
+	// 关闭自动驾驶期间的回撤就永远不会被记账，一开回来直接看到"回撤 0%"。
+	if _, riskErr := s.ObserveEquity(ctx, accountID, snapshot.Equity, time.Now()); riskErr != nil {
+		s.logf("event=trading_drawdown_observe_failed plan=%s err=%v", planID, riskErr)
+	}
 
 	// 阈值先算出来：即使这一轮因为"没有变化"被跳过，计划里也要留下它依据的额度，
 	// 否则复盘时会看到一份没有上限的跳过记录。
