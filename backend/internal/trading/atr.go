@@ -276,8 +276,33 @@ func (s *Service) TrailStopsByATR(ctx context.Context, accountID string) (int, e
 	return updated, nil
 }
 
-// SetStopLoss 只更新止损价，并对"上移"加一条 SQL 级保护。
+// ATRPercentMap 返回各持仓的 ATR 占现价百分比（键为规范化后的代码）。
 //
+// 取不到的标的不进 map，而不是塞 0：0 会被下游当成"波动为零"，
+// 从而算出 0 宽的移动止损。缺失必须是"没有这个键"，由调用方退回固定参数。
+func (s *Service) ATRPercentMap(ctx context.Context, positions []Position) map[string]float64 {
+	if len(positions) == 0 {
+		return nil
+	}
+	result := make(map[string]float64, len(positions))
+	for _, position := range positions {
+		if position.Quantity <= 0 {
+			continue
+		}
+		symbol := normalizeSymbolOrEmpty(position.Symbol)
+		if symbol == "" {
+			continue
+		}
+		profile := s.loadATR(ctx, symbol)
+		if !profile.Valid() {
+			continue
+		}
+		result[symbol] = profile.ATRPercent()
+	}
+	return result
+}
+
+// SetStopLoss 只更新止损价，并对"上移"加一条 SQL 级保护。
 // WHERE 条件里带 stop_loss_price < ? 而不是先读后写：ATR 追踪与人工修改
 // 可能同时发生，先读后写会把人工下调的止损又抬回去。
 func (s *Store) SetStopLoss(ctx context.Context, accountID, symbol string, stop float64, now time.Time) error {

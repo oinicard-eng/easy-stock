@@ -10,8 +10,10 @@ package trading
 //  3. 每个工具的输出都要落库。模型"看了什么才做出这个决定"是复盘的第一手材料，
 //     只把结论写进计划等于把推理过程扔掉了。
 //
-// 所以这里定义的是白名单：七个纯读工具，参数严格校验，输出有行数上限，
+// 所以这里定义的是白名单：十二个纯读工具，参数严格校验，输出有行数上限，
 // 数据源全部来自本轮快照与现有 provider，不引入任何新的外部依赖。
+// 其中七个只看价格结构（资金流、行业强度、成分、日线、详情、对比、记忆），
+// 五个回答"为什么涨"（新闻、公告、龙虎榜、大盘、两融，见 tools_market.go）。
 
 import (
 	"context"
@@ -78,7 +80,11 @@ type Toolbox struct {
 	// 而当日快照只能看到"今天涨了多少"——后者不足以判断一笔交易的风险回报。
 	klines   KLineProvider
 	klineAlt KLineProvider
-	now      time.Time
+	// marketIntel / news 回答的是"为什么涨"：公告、龙虎榜、大盘、两融、新闻。
+	// 只有价格结构时，模型写出的理由只能是价格的同义反复。
+	marketIntel MarketIntelProvider
+	news        NewsSearchProvider
+	now         time.Time
 }
 
 const (
@@ -91,7 +97,7 @@ const (
 
 // Specs 返回全部工具说明。顺序稳定，保证提示词可复现。
 func (t *Toolbox) Specs() []ToolSpec {
-	return []ToolSpec{
+	return append([]ToolSpec{
 		{
 			Name:        "list_sector_flow",
 			Description: "板块资金流排行（主力净流入、净占比、5日/10日累计）。用于判断资金正在流入还是撤离哪个方向。",
@@ -150,7 +156,7 @@ func (t *Toolbox) Specs() []ToolSpec {
 				{Name: "limit", Type: "int", Desc: "返回条数，默认 6，最多 12"},
 			},
 		},
-	}
+	}, marketIntelSpecs()...)
 }
 
 // Call 执行一个工具。未知工具名返回错误，模型看到错误后可以自行改正。
@@ -170,6 +176,16 @@ func (t *Toolbox) Call(ctx context.Context, name string, args map[string]any) (T
 		return t.compareSymbols(args)
 	case "recall_trades":
 		return t.recallTrades(ctx, args)
+	case "search_news":
+		return t.searchNews(ctx, args)
+	case "get_announcements":
+		return t.getAnnouncements(ctx, args)
+	case "get_billboard":
+		return t.getBillboard(ctx, args)
+	case "get_market_context":
+		return t.getMarketContext(ctx, args)
+	case "get_margin_balance":
+		return t.getMarginBalance(ctx, args)
 	default:
 		return ToolOutcome{}, fmt.Errorf("没有名为 %q 的工具，可用工具：%s", name, toolNames(t.Specs()))
 	}

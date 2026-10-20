@@ -946,6 +946,40 @@ export async function fetchTradingPerformance(config: BackendConfig, days = 30, 
 	return payload.data;
 }
 
+// TradeCalibrationBucket 是一个置信度区间的校准结果。
+// gap = 真实胜率 − 平均自评：负值表示这个区间"说得很满、做得一般"。
+export type TradeCalibrationBucket = {
+	label: string;
+	lower: number;
+	upper: number;
+	samples: number;
+	wins: number;
+	losses: number;
+	flats: number;
+	win_rate: number;
+	avg_confidence: number;
+	avg_pnl_percent: number;
+	gap: number;
+};
+
+export type TradeCalibration = {
+	account_id: string;
+	samples: number;
+	flats: number;
+	missing: number;
+	brier: number;
+	buckets: TradeCalibrationBucket[];
+	verdict: string;
+	generated_at: string;
+};
+
+// fetchTradeCalibration 读置信度校准报告。
+// 它是"给自己照镜子"的只读接口，不参与任何交易决策。
+export async function fetchTradeCalibration(config: BackendConfig, signal?: AbortSignal): Promise<TradeCalibration> {
+	const payload = await requestJSON<{ data: TradeCalibration }>(config, `/api/v1/trading/calibration`, { signal });
+	return payload.data;
+}
+
 export async function fetchTradingReviews(config: BackendConfig, limit = 30): Promise<TradeReview[]> {
 	const payload = await requestJSON<{ data: TradeReview[] }>(config, `/api/v1/trading/reviews?limit=${limit}`);
 	return payload.data ?? [];

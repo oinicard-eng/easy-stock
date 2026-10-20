@@ -496,6 +496,14 @@ func NewServer(config any) *Server {
 		if s.kLinePrimary != nil {
 			s.trading.SetKLine(s.kLinePrimary, s.kLineFallback)
 		}
+		// 公告/龙虎榜/大盘/两融：行情总览已经全都有，这里只做接口收窄。
+		// 缺了不影响交易，只是模型回答不了"为什么涨"。
+		if s.marketOverview != nil {
+			s.trading.SetMarketIntel(tradingMarketIntelAdapter{inner: s.marketOverview})
+		}
+		if news := newTradingNewsAdapter(s.newsProvider, s.stockNewsSearch); news != nil {
+			s.trading.SetNews(news)
+		}
 		// 自动循环只构造不启动：Start 由 main 在服务可用之后显式调用。
 		// 构造时启动会让"刚部署完就自动开始交易"变成默认行为。
 		s.autopilot = trading.NewAutopilot(s.trading, cfg.Logger)
@@ -845,6 +853,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/trading/reconcile", s.tradingReconcile)
 	// 运维面：健康检查给监控用，事件流给人排障用。
 	s.mux.HandleFunc("GET /api/v1/trading/health", s.tradingHealth)
+	s.mux.HandleFunc("GET /api/v1/trading/calibration", s.tradingCalibration)
 	// 风险面：回撤与总闸。它是账户级事实，与"系统健康"分开看。
 	s.mux.HandleFunc("GET /api/v1/trading/risk", s.tradingRisk)
 	s.mux.HandleFunc("POST /api/v1/trading/risk/drawdown/release", s.tradingDrawdownRelease)

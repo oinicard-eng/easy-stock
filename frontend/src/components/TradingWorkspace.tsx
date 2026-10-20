@@ -44,6 +44,7 @@ import {
 	fetchTradingHealth,
 	fetchTradingMemory,
 	fetchTradingPerformance,
+	fetchTradeCalibration,
 	fetchTradingReviews,
 	fetchTradingTimeline,
 	testTradingAlert,
@@ -88,6 +89,7 @@ import {
 	type TradeMemory,
 	type TradeOrder,
 	type TradePerformance,
+	type TradeCalibration,
 	type TradePlan,
 	type TradeCooldownView,
 	type TradePlanRiskReview,
@@ -601,6 +603,9 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 	const [reviews, setReviews] = useState<TradeReview[]>([]);
 	const [closedTrades, setClosedTrades] = useState<TradeClosedTrade[]>([]);
 	const [performance, setPerformance] = useState<TradePerformance | null>(null);
+	// 置信度校准：它回答"模型说 0.9 的时候是不是真的更准"。
+	// 置信度已经在参与仓位定价，没有校准曲线，这个字段就只是装饰。
+	const [calibration, setCalibration] = useState<TradeCalibration | null>(null);
 	const [reviewBusy, setReviewBusy] = useState(false);
 	// 防守线编辑中：{symbol, stop, takeProfit}。空表示当前没有在编辑。
 	const [protection, setProtection] = useState<{ symbol: string; stop: string; takeProfit: string } | null>(null);
@@ -797,7 +802,7 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 		async (signal?: AbortSignal) => {
 			if (!config) return;
 			try {
-				const [list, trades, perf, memory] = await Promise.all([
+				const [list, trades, perf, memory, calibrationReport] = await Promise.all([
 					fetchTradingReviews(config, 10),
 					fetchClosedTrades(config, 30),
 					// 业绩归因失败不该拖累复盘：两者读的是同一份账本，
@@ -805,12 +810,14 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 					fetchTradingPerformance(config, 30, signal).catch(() => null),
 					// 记忆同理：它是辅助证据，缺了不影响复盘结论。
 					fetchTradingMemory(config, { limit: 8 }, signal).catch(() => []),
+					fetchTradeCalibration(config, signal).catch(() => null),
 				]);
 				if (signal?.aborted) return;
 				setReviews(list);
 				setClosedTrades(trades);
 				setPerformance(perf);
 				setMemories(memory);
+				setCalibration(calibrationReport);
 			} catch {
 				// 复盘是辅助视图，拉取失败不阻断主流程。
 			}
@@ -1566,6 +1573,8 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 
 			<PerformancePanel performance={performance} onRefresh={() => void loadReview()} />
 
+			<CalibrationPanel report={calibration} />
+
 			<ReviewPanel
 				review={reviews[0] ?? null}
 				history={reviews}
@@ -1771,6 +1780,67 @@ function triggerName(trigger?: string): string {
 		return `止盈 ${level}`;
 	}
 	return triggerText[trigger] ?? trigger;
+}
+
+// CalibrationPanel 回答一个很具体的问题：模型说 0.9 的时候，是不是真的更准。
+//
+// 它存在的理由不是好看：置信度已经在参与仓位定价（置信度低就只给部分额度），
+// 如果这个自评数字从来没被验证过，"按置信度定价"等于把未经验证的自信放大成资金暴露。
+// 所以这里不隐藏难看的数字——偏差为负就是负，样本不足就直接说不足。
+function CalibrationPanel({ report }: { report: TradeCalibration | null }) {
+	if (!report) return null;
+	const buckets = (report.buckets ?? []).filter((item) => item.samples + item.flats > 0);
+	const shortSample = report.samples < 30;
+	const gapTone = (gap: number) => (gap <= -0.15 ? 'down' : gap >= 0.15 ? 'up' : '');
+	return (
+		<section className="trading-panel">
+			<header>
+				<Gauge size={17} />
+				<h2>置信度校准</h2>
+				<span className="trading-subtle">
+					{report.samples > 0 ? `${report.samples} 笔可校准 · Brier ${report.brier.toFixed(3)}` : '尚无可校准样本'}
+				</span>
+			</header>
+			<p className={`trading-hint${shortSample ? ' warn' : ''}`}>{report.verdict}</p>
+			{buckets.length > 0 && (
+				<table className="trading-calibration">
+					<thead>
+						<tr>
+							<th>自评区间</th>
+							<th>笔数</th>
+							<th>实际胜率</th>
+							<th>平均自评</th>
+							<th>偏差</th>
+							<th>平均盈亏</th>
+						</tr>
+					</thead>
+					<tbody>
+						{buckets.map((item) => (
+							<tr key={item.label}>
+								<td>{item.label}</td>
+								<td>
+									{item.samples}
+									{item.flats > 0 ? ` + ${item.flats} 平` : ''}
+								</td>
+								<td>{item.samples > 0 ? `${(item.win_rate * 100).toFixed(0)}%` : '—'}</td>
+								<td>{(item.avg_confidence * 100).toFixed(0)}%</td>
+								<td className={gapTone(item.gap)}>
+									{item.samples > 0 ? `${item.gap > 0 ? '+' : ''}${(item.gap * 100).toFixed(0)}pp` : '—'}
+								</td>
+								<td className={item.avg_pnl_percent > 0 ? 'up' : item.avg_pnl_percent < 0 ? 'down' : ''}>
+									{item.samples > 0 ? `${item.avg_pnl_percent > 0 ? '+' : ''}${item.avg_pnl_percent.toFixed(2)}%` : '—'}
+								</td>
+							</tr>
+						))}
+					</tbody>
+				</table>
+			)}
+			<p className="trading-hint">
+				排除项：{report.flats} 笔打平、{report.missing} 笔未填置信度。打平不算失败（否则胜率被系统性压低），
+				未填不当作零信心（保护性卖出的 0 是刻意的）。
+			</p>
+		</section>
+	);
 }
 
 // ReviewPanel 展示"系统今天学到了什么"。

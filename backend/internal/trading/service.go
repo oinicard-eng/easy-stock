@@ -81,6 +81,10 @@ type Service struct {
 	// 没有它时 K 线工具报"数据源未配置"，其余功能不受影响。
 	kline    KLineProvider
 	klineAlt KLineProvider
+	// marketIntel / news 是"为什么涨"这一层的数据：公告、龙虎榜、大盘、两融、新闻。
+	// 与上面两项同构：可选注入，缺了就明确报错。
+	marketIntel MarketIntelProvider
+	news        NewsSearchProvider
 
 	// catalogCache 保存最近一次全市场快照，供调研工具按行业下钻。
 	// 只放内存不落库：几千条目录塞进每份计划会让库迅速膨胀，
@@ -175,6 +179,21 @@ func (s *Service) SetKLine(primary, fallback KLineProvider) {
 	s.klineAlt = fallback
 }
 
+// SetMarketIntel 注入公告/龙虎榜/大盘/两融数据源。可选：没有它时这五个工具
+// 会明确说"数据源未配置"，模型换用价格类工具，而不是收到一份空白数据。
+func (s *Service) SetMarketIntel(provider MarketIntelProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.marketIntel = provider
+}
+
+// SetNews 注入新闻数据源。与其余数据源一样是可选的。
+func (s *Service) SetNews(provider NewsSearchProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.news = provider
+}
+
 // rememberCatalog 缓存最近一次全市场快照，供调研工具按行业下钻使用。
 func (s *Service) rememberCatalog(entries []foundation.StockCatalogEntry) {
 	cache := make(map[string]foundation.StockCatalogEntry, len(entries))
@@ -199,16 +218,19 @@ func (s *Service) buildToolbox(accountID string, snapshot Snapshot, now time.Tim
 	s.mu.Lock()
 	flow := s.sectorFlow
 	primary, fallback := s.kline, s.klineAlt
+	intel, news := s.marketIntel, s.news
 	s.mu.Unlock()
 	return &Toolbox{
-		store:      s.store,
-		accountID:  s.accountID(accountID),
-		snapshot:   snapshot,
-		catalog:    cache,
-		sectorFlow: flow,
-		klines:     primary,
-		klineAlt:   fallback,
-		now:        now,
+		store:       s.store,
+		accountID:   s.accountID(accountID),
+		snapshot:    snapshot,
+		catalog:     cache,
+		sectorFlow:  flow,
+		klines:      primary,
+		klineAlt:    fallback,
+		marketIntel: intel,
+		news:        news,
+		now:         now,
 	}
 }
 
@@ -488,6 +510,13 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		snapshot.Cooldowns = cooldowns
 		plan.Snapshot.Cooldowns = cooldowns
 	}
+	// 波动率同理：它只影响防守线的宽度，与取数无关。
+	// 只给持仓算，不给全候选池算——候选池几十只票，全部拉日线会把一轮计划拖慢几十秒，
+	// 而买入侧的止损校正本来就是按下单标的单独处理的。
+	if atrMap := s.ATRPercentMap(ctx, snapshot.Positions); len(atrMap) > 0 {
+		snapshot.ATRPercent = atrMap
+		plan.Snapshot.ATRPercent = atrMap
+	}
 	// 每次判断前先量一次净值。手动模式下没有循环，若只在自动循环里观察，
 	// 关闭自动驾驶期间的回撤就永远不会被记账，一开回来直接看到"回撤 0%"。
 	if _, riskErr := s.ObserveEquity(ctx, accountID, snapshot.Equity, time.Now()); riskErr != nil {
@@ -569,6 +598,10 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		Blocks:     blocks,
 		Cooldowns:  snapshot.Cooldowns,
 		Memories:   s.MemoriesForPrompt(ctx, accountID, snapshot, time.Now()),
+		// 校准结论与上一轮调研都取自持久化记录，不放进快照：
+		// 前者每次都能重算，后者只在本轮有效，塞进快照会让计划体积无谓增长。
+		Calibration:   s.calibrationPromptLine(ctx, accountID, time.Now()),
+		PriorResearch: s.PriorResearchForPrompt(ctx, accountID, time.Now()),
 	})
 
 	startedAt := time.Now()

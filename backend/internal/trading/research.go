@@ -385,6 +385,11 @@ func buildResearchPrompt(in ResearchInput, steps []ResearchStep, remaining int) 
 	// K 线是唯一能给出"位置 + 波动"的工具，值得在收尾前对重点标的查一次。
 	builder.WriteString("5. 准备给某只票较高权重时，先用 get_kline 看它离均线多远、ATR 占现价多少、处于 20 日区间的什么位置。\n")
 	builder.WriteString("   同样 8% 的权重，放在日波动 1% 和 5% 的票上完全是两种风险；没有这个数据就不要声称自己评估过风险。\n")
+	// 工具带扩到 12 个之后，最容易犯的错不是"用错工具"，而是"只用价格类工具"。
+	// 只查资金流与涨幅，写出来的理由必然和价格同义反复——这不是判断，是复述。
+	builder.WriteString("6. 如果你的理由只有「资金流入 + 涨幅居前」，说明你还没查清为什么涨：\n")
+	builder.WriteString("   用 get_announcements 看有无业绩预告/减持/问询，用 search_news 看有无政策或订单，\n")
+	builder.WriteString("   用 get_billboard 看是机构还是游资在做。查不到就如实写「未查到」，不要用板块涨幅顶替个股原因。\n")
 	return builder.String()
 }
 

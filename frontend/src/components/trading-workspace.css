@@ -1415,3 +1415,28 @@
 }
 .trading-sandbox-compare strong { font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
 .trading-error-text { color: #c0533f; font-size: var(--fs-small); }
+
+/* 置信度校准表：数字列一律右对齐并等宽，让"偏差"那一列能一眼看出正负 */
+.trading-calibration {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: var(--fs-small);
+	font-variant-numeric: tabular-nums;
+	margin: 8px 0;
+}
+.trading-calibration th,
+.trading-calibration td {
+	padding: 6px 10px;
+	text-align: right;
+	border-bottom: 1px solid var(--line-soft, var(--line));
+	white-space: nowrap;
+}
+.trading-calibration th:first-child,
+.trading-calibration td:first-child { text-align: left; }
+.trading-calibration th {
+	font-weight: 500;
+	color: var(--muted);
+	background: transparent;
+}
+.trading-calibration td.up { color: var(--up, #d64545); }
+.trading-calibration td.down { color: var(--down, #2f9e6f); }

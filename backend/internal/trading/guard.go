@@ -45,6 +45,49 @@ func DefaultGuardConfig() GuardConfig {
 	}
 }
 
+// 移动止损的两个 ATR 倍数与上下界。
+//
+// 下限存在的理由：再低的波动率也可能出现 1% 的日内噪音，
+// 3% 的回撤宽度是"不让噪音触发"的底线；上限 12% 是"别把移动止损做成止损"的边界——
+// 超过 12% 的回撤已经够触及买入时的止损线，移动止损就失去意义了。
+const (
+	trailArmATRMult      = 1.5
+	trailArmMinPercent   = 2.0
+	trailArmMaxPercent   = 8.0
+	trailWidthATRMult    = 2.5
+	trailWidthMinPercent = 3.0
+	trailWidthMaxPercent = 12.0
+)
+
+// guardTrailParams 返回本持仓的（启动门槛, 回撤宽度）。
+//
+// 没有 ATR 时退回配置值而不是猜一个：一只票没有日线，说明我们对它的波动一无所知，
+// 此时用"中等波动"的参数比用 0 或极值都更接近真实风险。
+func guardTrailParams(config GuardConfig, atrPercent float64) (arm, distance float64) {
+	arm, distance = config.TrailArmPercent, config.TrailPercent
+	if atrPercent <= 0 {
+		return arm, distance
+	}
+	arm = clampFloat(trailArmATRMult*atrPercent, trailArmMinPercent, trailArmMaxPercent)
+	distance = clampFloat(trailWidthATRMult*atrPercent, trailWidthMinPercent, trailWidthMaxPercent)
+	// 启动门槛不得高于回撤宽度：门槛高于宽度意味着"刚启用就已经满足离场条件"，
+	// 那实际上是一只票一浮盈就被卖掉。
+	if arm > distance {
+		arm = distance
+	}
+	return round2(arm), round2(distance)
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
 func (c GuardConfig) normalize() GuardConfig {
 	defaults := DefaultGuardConfig()
 	if c.TrailPercent <= 0 || c.TrailPercent > 30 {
@@ -115,7 +158,8 @@ func BuildProtectiveOrders(snapshot Snapshot, rules RiskRules, config GuardConfi
 			continue
 		}
 		heldDays := holdingDays(position.OpenedAt, now)
-		trigger, fraction, verdict := evaluatePosition(position, price, heldDays, rules, config)
+		atrPercent := snapshot.ATRPercent[normalizeSymbolOrEmpty(position.Symbol)]
+		trigger, fraction, verdict := evaluatePosition(position, price, heldDays, atrPercent, rules, config)
 		if trigger == TriggerNoTrigger {
 			continue
 		}
@@ -170,7 +214,7 @@ func BuildProtectiveOrders(snapshot Snapshot, rules RiskRules, config GuardConfi
 // → 止盈（计划内兑现）→ 移动止损（保住利润）→ 时间止损（期限到了）。
 // 前两条是清仓，中间两条是减仓，最后两条按情形定力度——力度差异写在这里，
 // 因为"止损"和"失效"如果都用清仓执行，模型写下的失效条件就变成了第二个止损。
-func evaluatePosition(position Position, price float64, heldDays int, rules RiskRules, config GuardConfig) (string, float64, policy.Verdict) {
+func evaluatePosition(position Position, price float64, heldDays int, atrPercent float64, rules RiskRules, config GuardConfig) (string, float64, policy.Verdict) {
 	profit := 0.0
 	if position.AverageCost > 0 {
 		profit = (price/position.AverageCost - 1) * 100
@@ -229,14 +273,18 @@ func evaluatePosition(position Position, price float64, heldDays int, rules Risk
 	}
 
 	// 5. 移动止损：已经在盈利，但从最高点回撤了足够多。
-	if position.PeakPrice > 0 && profit >= config.TrailArmPercent {
+	// 启动门槛与回撤宽度按波动率缩放：低波动股 2% 浮盈就够启动、回撤 3% 离场，
+	// 高波动股则要 8% 浮盈才启动、允许回撤 12%。用同一套 4%/6% 的后果是
+	// 前者永远等不到启动、后者开盘就被洗出去。
+	arm, distance := guardTrailParams(config, atrPercent)
+	if position.PeakPrice > 0 && profit >= arm {
 		drawdown := (price/position.PeakPrice - 1) * 100
-		if drawdown <= -config.TrailPercent {
+		if drawdown <= -distance {
 			return TriggerTrailStop, 100, policy.Verdict{
 				Code: policy.CodeGuardTrailStop, Level: policy.LevelBlock, Scope: policy.ScopePosition,
-				Symbol: position.Symbol, Metric: round2(drawdown), Limit: -config.TrailPercent,
-				Message: fmt.Sprintf("%s 从最高 %.2f 回撤 %.2f%% 至 %.2f（浮盈仍 %+.2f%%），移动止损离场",
-					position.Symbol, position.PeakPrice, drawdown, price, profit),
+				Symbol: position.Symbol, Metric: round2(drawdown), Limit: -distance,
+				Message: fmt.Sprintf("%s 从最高 %.2f 回撤 %.2f%% 至 %.2f（浮盈仍 %+.2f%%，门槛 %.2f%%、宽度 %.2f%%），移动止损离场",
+					position.Symbol, position.PeakPrice, drawdown, price, profit, arm, distance),
 			}
 		}
 	}

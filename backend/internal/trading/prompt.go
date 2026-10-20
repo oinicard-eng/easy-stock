@@ -51,6 +51,14 @@ type PlanPromptInput struct {
 	// 与 Experience 的分工：Experience 是聚合统计（"止损胜率 25%"），
 	// Memories 是单笔情境（"那天为什么买、后来发生了什么"）。
 	Memories []MemoryBrief
+	// Calibration 是"你的置信度准不准"的统计结论，样本不足时为空。
+	// 它放在经验段里而不是单独一章：它和"止损胜率 25%"是同一类事实，
+	// 单独成章会让模型以为这是一个新的任务要求。
+	Calibration string
+	// PriorResearch 是上一轮调研已经确认过的事实。
+	// 之所以要传：同一个板块的资金流，模型可能连续三轮各查一次，
+	// 每次都是一次模型往返；而三轮之间真正变化的往往只有价格。
+	PriorResearch string
 }
 
 // BlockedIntent 是一条被拦下的建议。它保留模型的原始意图（想买多少、什么价位），
@@ -201,6 +209,10 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	for _, line := range ExperienceLines(input.Experience) {
 		fmt.Fprintf(&builder, "- %s\n", line)
 	}
+	if line := strings.TrimSpace(input.Calibration); line != "" {
+		fmt.Fprintf(&builder, "- %s\n", line)
+		fmt.Fprintf(&builder, "  置信度会被折算成仓位上限：自评偏高时，系统按更低的有效置信度定价，不会按你写的数字给额度。\n")
+	}
 	// 明确边界：经验是事实描述，不是对本轮的建议。不写这句，模型会把
 	// "上次止损的都亏了" 理解成 "这次不要止损"。
 	builder.WriteString("经验只说明过去发生过什么，不构成对本轮的指令。每一笔仍要独立判断，止损纪律不因历史统计而放宽。\n")
@@ -213,6 +225,15 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 			fmt.Fprintf(&builder, "- %s\n", line)
 		}
 		builder.WriteString("记忆是单笔事实，不能直接推广成本轮结论：同样的环境里，第二次的结果可能完全相反。\n")
+	}
+
+	// 上一轮已经查过的事实：省掉重复查询，同时明确标注它可能过期。
+	// 不标"可能过期"的话，模型会拿半小时前的资金流当成现价依据。
+	if text := strings.TrimSpace(input.PriorResearch); text != "" {
+		builder.WriteString("\n### 上一轮你已经查过的事实（可能已过期，引用前复核）\n")
+		builder.WriteString(text)
+		builder.WriteString("\n这些是上一轮的观察，不是本轮的新数据。价格、资金流、公告随时会变；\n")
+		builder.WriteString("如果本轮判断依赖其中的数字，重新用工具查一次，而不是直接沿用。\n")
 	}
 
 	// 这一段是"闭环"的关键：把模型自己的历史意图与系统的否决意见送回输入端。

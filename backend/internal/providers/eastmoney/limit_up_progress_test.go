@@ -63,7 +63,11 @@ func TestProgressiveHistoryPublishesRecentDayBeforeSlowHistory(t *testing.T) {
 	c := NewClient(WithTopicBaseURL(server.URL))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	partial := make(chan []foundation.LimitUpEvent, 8)
+	// 缓冲必须覆盖"最多可能发布几次"：每个有数据的交易日各发布一次，
+	// 而 16 个自然日里最多有 16 个交易日。原先写死 8，一旦窗口内交易日多于 8 个
+	// （节假日前后的常见情形），第 9 次 publish 就会阻塞在测试没人读的通道上，
+	// 进而卡住整个收集循环——表现为整包测试超时，且与代码逻辑无关。
+	partial := make(chan []foundation.LimitUpEvent, lookback)
 	done := make(chan error, 1)
 	go func() {
 		_, err := c.ProgressiveRecentLimitUps(ctx, lookback, func(events []foundation.LimitUpEvent) { partial <- events })

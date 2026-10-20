@@ -312,6 +312,12 @@ type Snapshot struct {
 	// Cooldowns 是本次计划时生效的冷静期约束（止损后禁买）。
 	// 随快照落库，被拦的那笔建议三个月后还能回答"当时为什么不让我买"。
 	Cooldowns CooldownView `json:"cooldowns,omitempty"`
+	// ATRPercent 是本次涉及标的的波动率（ATR14 占现价百分比）。
+	// 它不是行情，而是"这只票正常一天走多远"的度量；守卫用它决定移动止损
+	// 什么时候启用、留多宽的呼吸空间。缺失时不猜：退回配置里的固定百分比。
+	// 刻意不进变化检测指纹——ATR 每天都在变，把它算进指纹会让"什么都没变"
+	// 这一判断永远不成立，安静模式立刻失效。
+	ATRPercent map[string]float64 `json:"atr_percent,omitempty"`
 }
 
 // AvailableCash 返回快照时刻真正可用于新开仓的资金。

@@ -38,6 +38,24 @@ func (s *Server) tradingHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, map[string]any{"data": health})
 }
 
+// tradingCalibration 返回置信度校准报告：按自评置信度分桶看真实胜率与 Brier 分数。
+//
+// 这是一个"给自己照镜子"的接口，不参与交易决策。之所以要暴露出来：
+// 置信度已经在参与仓位定价，如果它没被校准过，用户看到的仓位就是
+// 一个未经验证的自评数字放大后的结果。
+func (s *Server) tradingCalibration(w http.ResponseWriter, r *http.Request) {
+	if s.trading == nil {
+		writeError(w, http.StatusServiceUnavailable, "交易服务不可用")
+		return
+	}
+	report, err := s.trading.Calibration(r.Context(), r.URL.Query().Get("account_id"), time.Now())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": report})
+}
+
 // tradingEvents 返回最近的运行事件，新的在前。供页面与排障使用。
 func (s *Server) tradingEvents(w http.ResponseWriter, r *http.Request) {
 	if s.trading == nil {
