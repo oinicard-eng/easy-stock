@@ -74,6 +74,10 @@ type Service struct {
 	// sectorFlow 是可选能力：没配置资金流数据源时，对应工具会明确报错，
 	// 而不是让模型以为"今天没有资金流进任何板块"。
 	sectorFlow SectorFlowProvider
+	// kline / klineAlt 是日线与备用日线来源。同样是可选的：
+	// 没有它时 K 线工具报"数据源未配置"，其余功能不受影响。
+	kline    KLineProvider
+	klineAlt KLineProvider
 
 	// catalogCache 保存最近一次全市场快照，供调研工具按行业下钻。
 	// 只放内存不落库：几千条目录塞进每份计划会让库迅速膨胀，
@@ -149,6 +153,15 @@ func (s *Service) SetSectorFlow(provider SectorFlowProvider) {
 	s.sectorFlow = provider
 }
 
+// SetKLine 注入日线数据源（主源 + 备源）。备源允许为空。
+// 与资金流同理，缺数据时工具会明说，不会拼一条假曲线出来。
+func (s *Service) SetKLine(primary, fallback KLineProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.kline = primary
+	s.klineAlt = fallback
+}
+
 // rememberCatalog 缓存最近一次全市场快照，供调研工具按行业下钻使用。
 func (s *Service) rememberCatalog(entries []foundation.StockCatalogEntry) {
 	cache := make(map[string]foundation.StockCatalogEntry, len(entries))
@@ -172,6 +185,7 @@ func (s *Service) buildToolbox(accountID string, snapshot Snapshot, now time.Tim
 	s.catalogMu.RUnlock()
 	s.mu.Lock()
 	flow := s.sectorFlow
+	primary, fallback := s.kline, s.klineAlt
 	s.mu.Unlock()
 	return &Toolbox{
 		store:      s.store,
@@ -179,12 +193,63 @@ func (s *Service) buildToolbox(accountID string, snapshot Snapshot, now time.Tim
 		snapshot:   snapshot,
 		catalog:    cache,
 		sectorFlow: flow,
+		klines:     primary,
+		klineAlt:   fallback,
 		now:        now,
 	}
 }
 
-func (s *Service) BrokerName() string {
-	if s.broker == nil {
+// openOrdersForPrompt 取当前未成交委托，供提示词列出"已经挂出去的单"。
+// 读失败只记日志：少列一段挂单会让模型多提一笔重复建议（会被风控拦下），
+// 而为此中断整轮计划，代价大得多。
+func (s *Service) openOrdersForPrompt(ctx context.Context, accountID string) []Order {
+	orders, err := s.store.ListPendingOrders(ctx, accountID)
+	if err != nil {
+		s.logf("event=trading_pending_orders_failed account=%s err=%v", accountID, err)
+		return nil
+	}
+	return orders
+}
+
+// recentBlocksForPrompt 取最近 4 小时被拦下的建议，按「标的+方向+规则」去重后带上重复次数。
+//
+// 窗口取 4 小时而不是更长：半日前的拦截多半对应另一个行情环境，
+// 拿它约束当下，会让模型对已经变化的市场过度克制。
+// 去重是必需的：模型若连续 5 轮犯同一个错，列出 5 条一样的记录只会占掉注意力，
+// 一条带「重复 5 次」的记录反而更能说明问题。
+func (s *Service) recentBlocksForPrompt(ctx context.Context, accountID string) []BlockedIntent {
+	const window = 4 * time.Hour
+	const limit = 20
+	orders, err := s.store.ListRejectedOrders(ctx, accountID, time.Now().UTC().Add(-window), limit)
+	if err != nil {
+		s.logf("event=trading_recent_blocks_failed account=%s err=%v", accountID, err)
+		return nil
+	}
+	blocks := make([]BlockedIntent, 0, limit)
+	index := map[string]int{}
+	for _, order := range orders {
+		key := order.Symbol + "|" + string(order.Side) + "|" + order.RejectCode
+		if seat, seen := index[key]; seen {
+			blocks[seat].Repeat++
+			continue
+		}
+		index[key] = len(blocks)
+		blocks = append(blocks, BlockedIntent{
+			Symbol: order.Symbol, Name: order.Name, Side: order.Side,
+			Weight: order.TargetWeightPercent, Quant: order.Quantity,
+			Price: order.LimitPrice, Code: order.RejectCode, Reason: order.RejectReason,
+			Blocked: order.CreatedAt, Repeat: 1,
+		})
+	}
+	// 只留 6 条：这是"提醒"，不是台账。超过 6 条说明模型在同一处反复失败，
+	// 那本身就该由降级或人工介入处理，而不是继续堆提示词。
+	if len(blocks) > 6 {
+		blocks = blocks[:6]
+	}
+	return blocks
+}
+
+func (s *Service) BrokerName() string {	if s.broker == nil {
 		return "paper"
 	}
 	return s.broker.Name()
@@ -451,6 +516,8 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		// 每条计划记录多出几 KB，而这些数字下次还能重新算出来。
 		Experience: s.Experience(ctx, accountID, 8),
 		Research:   &research,
+		Pending:    s.openOrdersForPrompt(ctx, accountID),
+		Blocks:     s.recentBlocksForPrompt(ctx, accountID),
 	})
 
 	startedAt := time.Now()

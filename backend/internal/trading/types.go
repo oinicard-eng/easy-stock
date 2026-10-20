@@ -212,6 +212,9 @@ type Order struct {
 	// FrozenAt 记录冻结发生的时间，用于识别长期未成交的僵尸挂单。
 	FrozenAt     *time.Time `json:"frozen_at,omitempty"`
 	RejectReason string     `json:"reject_reason,omitempty"`
+	// RejectCode 是拦截规则的代码（如 sector.weight）。只存中文原因不存代码，
+	// 下一轮提示词就只能原样复述一句人话，模型无法据此判断"该改什么"。
+	RejectCode string `json:"reject_code,omitempty"`
 	Thesis       string     `json:"thesis,omitempty"`
 	Invalidation string     `json:"invalidation,omitempty"`
 	Confidence   float64    `json:"confidence,omitempty"`

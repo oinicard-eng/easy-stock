@@ -380,6 +380,11 @@ func buildResearchPrompt(in ResearchInput, steps []ResearchStep, remaining int) 
 	builder.WriteString("3. conclusion 只陈述事实（如「算力板块主力净流入 12 亿，居概念板块第一」），\n")
 	builder.WriteString("   禁止出现「建议买入」「可以加仓」这类判断——判断是下一步的事。\n")
 	builder.WriteString("4. 资料够用就 done。不要为了用满次数而查无关的东西。\n")
+	// 这条不是"多用工具"的号召，而是针对一个具体缺陷：
+	// 只看当日涨幅就给权重，等于不知道这笔交易要承担多大波动。
+	// K 线是唯一能给出"位置 + 波动"的工具，值得在收尾前对重点标的查一次。
+	builder.WriteString("5. 准备给某只票较高权重时，先用 get_kline 看它离均线多远、ATR 占现价多少、处于 20 日区间的什么位置。\n")
+	builder.WriteString("   同样 8% 的权重，放在日波动 1% 和 5% 的票上完全是两种风险；没有这个数据就不要声称自己评估过风险。\n")
 	return builder.String()
 }
 

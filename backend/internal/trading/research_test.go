@@ -163,10 +163,15 @@ func TestToolboxSectorFlowWithoutProvider(t *testing.T) {
 	}
 }
 
+// 无法识别的维度要明确报错，并说清允许什么。
+//
+// 注意这里用的是"板块"而不是"行业"：2026-10-21 起工具接受中英文别名
+// （行业/industry、概念/concept），因为实测模型会写 dimension:"行业"，
+// 严格拒绝只会白耗一步调研预算。真正该拒绝的是两者都不是的值。
 func TestToolboxRejectsBadDimension(t *testing.T) {
 	_, toolbox := researchToolbox(t)
 	toolbox.sectorFlow = staticSectorFlow{}
-	_, err := toolbox.Call(context.Background(), "list_sector_flow", map[string]any{"dimension": "行业"})
+	_, err := toolbox.Call(context.Background(), "list_sector_flow", map[string]any{"dimension": "板块"})
 	if err == nil || !strings.Contains(err.Error(), "concept") {
 		t.Fatalf("非法 dimension 应提示允许值，实际：%v", err)
 	}

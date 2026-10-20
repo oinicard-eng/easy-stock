@@ -626,6 +626,37 @@ func (s *Store) ListPendingOrders(ctx context.Context, accountID string) ([]Orde
 	return orders, rows.Err()
 }
 
+// ListRejectedOrders 返回 since 之后被拒的委托，新的在前。
+//
+// 它存在的唯一理由是给下一轮模型看："你上次想买这些，被这些理由拦了"。
+// 没有这条查询，模型每一轮都在重新犯错——实测同一批标的会被反复提交、
+// 反复在同一个规则上被拦，白烧 token 也白占计划名额。
+func (s *Store) ListRejectedOrders(ctx context.Context, accountID string, since time.Time, limit int) ([]Order, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT content_json FROM trading_orders
+		WHERE account_id=? AND status=? AND created_at>=?
+		ORDER BY created_at DESC LIMIT ?`,
+		accountID, string(OrderStatusRejected), nowText(since), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := []Order{}
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		var order Order
+		if err := json.Unmarshal([]byte(payload), &order); err == nil {
+			orders = append(orders, order)
+		}
+	}
+	return orders, rows.Err()
+}
+
 // ApplyFill 在单个事务内完成：写入成交、更新订单、更新持仓与现金。
 // 数量与价格由调用方（模拟撮合）确定，模型无法直接写入账本。
 func (s *Store) ApplyFill(ctx context.Context, order Order, quantity int, price, fee float64) (Order, error) {

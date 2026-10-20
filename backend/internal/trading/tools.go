@@ -10,7 +10,7 @@ package trading
 //  3. 每个工具的输出都要落库。模型"看了什么才做出这个决定"是复盘的第一手材料，
 //     只把结论写进计划等于把推理过程扔掉了。
 //
-// 所以这里定义的是白名单：六个纯读工具，参数严格校验，输出有行数上限，
+// 所以这里定义的是白名单：七个纯读工具，参数严格校验，输出有行数上限，
 // 数据源全部来自本轮快照与现有 provider，不引入任何新的外部依赖。
 
 import (
@@ -31,6 +31,12 @@ import (
 // 而不是返回一份编造的榜单。
 type SectorFlowProvider interface {
 	SectorFlowRanking(ctx context.Context, dimension string, limit int) ([]foundation.SectorFlowRank, foundation.SourceMeta, error)
+}
+
+// KLineProvider 是日线数据能力。没有注入时 K 线工具会明确报"数据源未配置"，
+// 而不是拿当日快照拼一条假曲线。
+type KLineProvider interface {
+	KLine(ctx context.Context, symbol string, period string, limit int) ([]foundation.KLine, error)
 }
 
 // ToolParam 描述一个工具参数，用于生成提示词里的调用说明。
@@ -68,7 +74,11 @@ type Toolbox struct {
 	snapshot   Snapshot
 	catalog    map[string]foundation.StockCatalogEntry
 	sectorFlow SectorFlowProvider
-	now        time.Time
+	// klines 是日线来源。K 线让模型能看到"位置"（均线、区间分位、波动率），
+	// 而当日快照只能看到"今天涨了多少"——后者不足以判断一笔交易的风险回报。
+	klines   KLineProvider
+	klineAlt KLineProvider
+	now      time.Time
 }
 
 const (
@@ -103,6 +113,14 @@ func (t *Toolbox) Specs() []ToolSpec {
 			Params: []ToolParam{
 				{Name: "sector", Type: "string", Required: true, Desc: "行业名或板块大类名"},
 				{Name: "limit", Type: "int", Desc: "返回条数，默认 10，最多 20"},
+			},
+		},
+		{
+			Name:        "get_kline",
+			Description: "个股日线与技术位置：MA5/10/20/60、ATR14 及其占现价比例、20 日区间分位、近 5 日与 20 日均量比、连续上涨/下跌天数。用于判断趋势位置与波动大小。",
+			Params: []ToolParam{
+				{Name: "symbol", Type: "string", Required: true, Desc: "6 位代码，如 600519"},
+				{Name: "days", Type: "int", Desc: "回看交易日数，默认 60，最多 120"},
 			},
 		},
 		{
@@ -144,6 +162,8 @@ func (t *Toolbox) Call(ctx context.Context, name string, args map[string]any) (T
 		return t.listSectorHeat(args)
 	case "list_sector_stocks":
 		return t.listSectorStocks(args)
+	case "get_kline":
+		return t.getKline(ctx, args)
 	case "get_symbol_detail":
 		return t.getSymbolDetail(args)
 	case "compare_symbols":
@@ -170,8 +190,13 @@ func (t *Toolbox) listSectorFlow(ctx context.Context, args map[string]any) (Tool
 		return ToolOutcome{}, fmt.Errorf("板块资金流数据源未配置，无法查询")
 	}
 	dimension := strings.ToLower(strings.TrimSpace(stringArg(args, "dimension")))
-	if dimension == "" {
+	// 中文别名必须接受。实测模型会写 dimension:"行业"，
+	// 严格拒绝的代价是白耗一步调研预算——一步就是一次模型往返。
+	switch dimension {
+	case "", "concept", "概念", "概念板块":
 		dimension = "concept"
+	case "industry", "行业", "行业板块":
+		dimension = "industry"
 	}
 	if dimension != "concept" && dimension != "industry" {
 		return ToolOutcome{}, fmt.Errorf("dimension 只能是 concept 或 industry，收到 %q", dimension)
@@ -293,6 +318,226 @@ func (t *Toolbox) listSectorStocks(args map[string]any) (ToolOutcome, error) {
 			item.Symbol, item.Name, item.Price, item.ChangePercent, item.FiveDay, moneyText(item.Amount))
 	}
 	return ToolOutcome{Text: clipToolText(builder.String()), Data: rows, Rows: len(rows), Truncated: truncated}, nil
+}
+
+
+// getKline 返回日线技术位置。
+//
+// 它回答的是提示词表格回答不了的问题：这只票在趋势的哪个位置、波动有多大。
+// 同样是 8% 的权重，放在 ATR 1.2% 的银行股和 ATR 5.8% 的概念股上是两种风险。
+// 没有波动率数据，模型只能拿"今天涨了几个点"代替风险判断——这正是
+// "看起来有依据、其实只有一根 K 线"的根源。
+func (t *Toolbox) getKline(ctx context.Context, args map[string]any) (ToolOutcome, error) {
+	if t.klines == nil {
+		return ToolOutcome{}, fmt.Errorf("日线数据源未配置，无法查询技术位置")
+	}
+	symbol := normalizeSymbolArg(stringArg(args, "symbol"))
+	if symbol == "" {
+		return ToolOutcome{}, fmt.Errorf("symbol 不能为空，且必须是 6 位代码")
+	}
+	days := intArg(args, "days", 60, 20, 120)
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	bars, err := t.klines.KLine(callCtx, symbol, "day", days)
+	if (err != nil || len(bars) == 0) && t.klineAlt != nil {
+		// 只有主源失败才动备源。备源也失败时保留主源错误：
+		// 主源的错误信息更能说明"为什么今天拿不到"，换成备源的超时反而误导排查。
+		if altBars, altErr := t.klineAlt.KLine(callCtx, symbol, "day", days); altErr == nil && len(altBars) > 0 {
+			bars, err = altBars, nil
+		}
+	}
+	if err != nil {
+		return ToolOutcome{}, fmt.Errorf("%s 日线获取失败：%v", symbol, err)
+	}
+	bars = cleanKLineBars(bars)
+	if len(bars) < 5 {
+		return ToolOutcome{}, fmt.Errorf("%s 可用日线只有 %d 根，不足以判断趋势（至少需要 5 根）", symbol, len(bars))
+	}
+
+	closes := make([]float64, len(bars))
+	volumes := make([]float64, len(bars))
+	for index, bar := range bars {
+		closes[index] = bar.Close
+		volumes[index] = bar.Volume
+	}
+	last := bars[len(bars)-1]
+	name := last.Symbol
+	if entry, ok := t.catalogEntry(symbol); ok && strings.TrimSpace(entry.Name) != "" {
+		name = entry.Name
+	}
+
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "%s %s 日线 %d 根（%s 至 %s）\n", symbol, name, len(bars),
+		bars[0].Time.In(cstZone()).Format("2006-01-02"), last.Time.In(cstZone()).Format("2006-01-02"))
+	fmt.Fprintf(&builder, "收盘 %.2f | 当日 %+.2f%%\n", last.Close, last.ChangePercent)
+
+	parts := make([]string, 0, 4)
+	for _, period := range []int{5, 10, 20, 60} {
+		if value := smaOf(closes, period); value > 0 {
+			parts = append(parts, fmt.Sprintf("MA%d %.2f(%+.1f%%)", period, value, (last.Close/value-1)*100))
+		}
+	}
+	if len(parts) > 0 {
+		fmt.Fprintf(&builder, "均线：%s\n", strings.Join(parts, " | "))
+	}
+	if align := maAlignment(closes); align != "" {
+		fmt.Fprintf(&builder, "排列：%s\n", align)
+	}
+
+	atr := atrOf(bars, 14)
+	if atr > 0 {
+		fmt.Fprintf(&builder, "ATR14 %.2f，占现价 %.2f%%\n", atr, atr/last.Close*100)
+	}
+
+	high, low := rangeOf(bars, 20)
+	if high > 0 && high > low {
+		fmt.Fprintf(&builder, "20日区间 %.2f–%.2f，当前分位 %.0f%%\n", low, high, (last.Close-low)/(high-low)*100)
+	}
+
+	if volumeRatio := volumeRatioOf(volumes, 5, 20); volumeRatio > 0 {
+		fmt.Fprintf(&builder, "量能：近5日均量 / 20日均量 = %.2f\n", volumeRatio)
+	}
+	if streak := closeStreak(closes); streak != 0 {
+		if streak > 0 {
+			fmt.Fprintf(&builder, "连续 %d 日收涨\n", streak)
+		} else {
+			fmt.Fprintf(&builder, "连续 %d 日收跌\n", -streak)
+		}
+	}
+
+	data := map[string]any{
+		"symbol": symbol, "bars": len(bars), "close": last.Close,
+		"ma5": smaOf(closes, 5), "ma10": smaOf(closes, 10),
+		"ma20": smaOf(closes, 20), "ma60": smaOf(closes, 60),
+		"atr14": round2(atr), "high20": high, "low20": low,
+	}
+	return ToolOutcome{Text: clipToolText(builder.String()), Data: data, Rows: len(bars)}, nil
+}
+
+// cleanKLineBars 过滤脏数据并按时间升序排好。
+// 指标计算对顺序极其敏感：倒序输入算出来的 MA 会变成"未来函数"，
+// 而且不会报错，只会给出一个看起来合理的错误数字。
+func cleanKLineBars(bars []foundation.KLine) []foundation.KLine {
+	cleaned := make([]foundation.KLine, 0, len(bars))
+	for _, bar := range bars {
+		if bar.Close <= 0 || bar.Time.IsZero() {
+			continue
+		}
+		if bar.High > 0 && bar.Low > 0 && bar.High < bar.Low {
+			continue
+		}
+		cleaned = append(cleaned, bar)
+	}
+	sort.SliceStable(cleaned, func(i, j int) bool { return cleaned[i].Time.Before(cleaned[j].Time) })
+	return cleaned
+}
+
+func smaOf(values []float64, period int) float64 {
+	if period <= 0 || len(values) < period {
+		return 0
+	}
+	sum := 0.0
+	for _, value := range values[len(values)-period:] {
+		sum += value
+	}
+	return sum / float64(period)
+}
+
+// atrOf 用简单平均真实波幅，而非 Wilder 平滑。
+// 两者在 60 根以内差异很小，而简单平均有一个好处：结果只取决于窗口内的数据，
+// 同样的输入永远得到同样的输出——回放时这点比"更专业"更重要。
+func atrOf(bars []foundation.KLine, period int) float64 {
+	if period <= 0 || len(bars) < period+1 {
+		return 0
+	}
+	sum := 0.0
+	start := len(bars) - period
+	for index := start; index < len(bars); index++ {
+		previous := bars[index-1].Close
+		high, low := bars[index].High, bars[index].Low
+		if high <= 0 || low <= 0 {
+			high, low = bars[index].Close, bars[index].Close
+		}
+		trueRange := math.Max(high-low, math.Max(math.Abs(high-previous), math.Abs(low-previous)))
+		sum += trueRange
+	}
+	return sum / float64(period)
+}
+
+func rangeOf(bars []foundation.KLine, period int) (high, low float64) {
+	if period <= 0 || len(bars) == 0 {
+		return 0, 0
+	}
+	start := len(bars) - period
+	if start < 0 {
+		start = 0
+	}
+	high, low = bars[start].High, bars[start].Low
+	for _, bar := range bars[start:] {
+		if bar.High > high {
+			high = bar.High
+		}
+		if bar.Low > 0 && (low <= 0 || bar.Low < low) {
+			low = bar.Low
+		}
+	}
+	return high, low
+}
+
+func volumeRatioOf(volumes []float64, short, long int) float64 {
+	if short <= 0 || long <= 0 || len(volumes) < long {
+		return 0
+	}
+	recent := smaOf(volumes, short)
+	base := smaOf(volumes, long)
+	if base <= 0 {
+		return 0
+	}
+	return recent / base
+}
+
+// closeStreak 返回末尾连续同向的根数：正数为连涨，负数为连跌。
+func closeStreak(closes []float64) int {
+	if len(closes) < 2 {
+		return 0
+	}
+	streak := 0
+	for index := len(closes) - 1; index > 0; index-- {
+		change := closes[index] - closes[index-1]
+		switch {
+		case change > 0 && streak >= 0:
+			streak++
+		case change < 0 && streak <= 0:
+			streak--
+		default:
+			return streak
+		}
+	}
+	return streak
+}
+
+// maAlignment 描述均线排列。模型看四个数字也能自己比较，
+// 但明确写出来能显著减少"看错排列"这类低级错误。
+func maAlignment(closes []float64) string {
+	ma5, ma10 := smaOf(closes, 5), smaOf(closes, 10)
+	ma20 := smaOf(closes, 20)
+	if ma5 <= 0 || ma10 <= 0 || ma20 <= 0 {
+		return ""
+	}
+	ma60 := smaOf(closes, 60)
+	switch {
+	case ma5 > ma10 && ma10 > ma20 && (ma60 <= 0 || ma20 > ma60):
+		return "多头（5>10>20>60）"
+	case ma5 < ma10 && ma10 < ma20 && (ma60 <= 0 || ma20 < ma60):
+		return "空头（5<10<20<60）"
+	case ma20 > 0 && ma60 > 0 && ma20 > ma60:
+		return "短期纠缠，中期仍在上方"
+	case ma20 > 0 && ma60 > 0 && ma20 < ma60:
+		return "短期纠缠，中期仍在下方"
+	default:
+		return "均线纠缠，无明确方向"
+	}
 }
 
 func (t *Toolbox) getSymbolDetail(args map[string]any) (ToolOutcome, error) {

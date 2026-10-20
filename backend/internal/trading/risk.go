@@ -101,6 +101,7 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 	block := func(order *Order, verdict policy.Verdict) {
 		order.Status = OrderStatusRejected
 		order.RejectReason = verdict.Message
+		order.RejectCode = verdict.Code
 		// 刻意保留 Quantity：被拦的建议也要能回答"模型原本想买多少"。
 		// 置零会留下一条"买入 0 股"的记录，既看不懂，也让复盘无法比较
 		// "模型想买 100 股被拦"和"模型只想买 100 股但资金不够"。

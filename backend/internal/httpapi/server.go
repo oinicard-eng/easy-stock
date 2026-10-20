@@ -491,6 +491,11 @@ func NewServer(config any) *Server {
 		if flow, ok := s.marketOverview.(trading.SectorFlowProvider); ok && flow != nil {
 			s.trading.SetSectorFlow(flow)
 		}
+		// 日线同理：有主源就接，备源可为空。没有日线时交易照常跑，
+		// 只是模型看不到均线与波动率——工具会明确说"数据源未配置"。
+		if s.kLinePrimary != nil {
+			s.trading.SetKLine(s.kLinePrimary, s.kLineFallback)
+		}
 		// 自动循环只构造不启动：Start 由 main 在服务可用之后显式调用。
 		// 构造时启动会让"刚部署完就自动开始交易"变成默认行为。
 		s.autopilot = trading.NewAutopilot(s.trading, cfg.Logger)

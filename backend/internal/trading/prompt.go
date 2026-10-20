@@ -11,7 +11,6 @@ import (
 )
 
 const maxPromptQuotes = 40
-
 // maxPromptCandidates 限制候选依据的行数，避免提示词过长挤占模型注意力。
 const maxPromptCandidates = 30
 
@@ -36,6 +35,30 @@ type PlanPromptInput struct {
 	// 快照是"系统给你的"，调研是"你自己去查的"，后者带有选择意图，
 	// 因此必须标明出处，避免模型把两次查询的结论当成本轮新增的事实。
 	Research *ResearchResult
+	// Pending 是本轮已挂出、尚未成交的委托。模型必须看得见它们，
+	// 否则会在 3 分钟后再给一笔同标的的建议，被"单票权重已含挂单"拦掉。
+	Pending []Order
+	// Blocks 是最近几小时被确定性规则拦下的建议，含原始数量与拦截原因。
+	// 这是本提示词里唯一"关于模型自己历史行为"的事实，也是打破
+	// "每轮重复同一个错误"的唯一手段。
+	Blocks []BlockedIntent
+}
+
+// BlockedIntent 是一条被拦下的建议。它保留模型的原始意图（想买多少、什么价位），
+// 因为"想买 100 股但被行业上限拦住"与"根本没想过"是两件不同的事。
+type BlockedIntent struct {
+	Symbol  string
+	Name    string
+	Side    Side
+	Weight  float64
+	Quant   int
+	Price   float64
+	Code    string
+	Reason  string
+	Blocked time.Time
+	// Repeat 是同一标的同一规则在窗口内被拦的次数。
+	// 次数比次数列表有用得多：它直接说明"这不是偶发，是模型没在改"。
+	Repeat int
 }
 
 // BuildPlanPrompt 组装交易计划提示词。
@@ -112,6 +135,22 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 		builder.WriteString("  说明：止损价由持仓防守线自动执行，不需要你在 orders 里重复卖出这些标的。\n")
 	}
 
+	// 挂单必须显式列出。快照里只有"冻结了多少钱"，模型看不到冻结在哪些标的上，
+	// 于是会再提一次同标的的建议——而它一定会在"单票权重含挂单"这条被拦。
+	// 这不是模型判断失误，是它拿到的信息不完整。
+	if len(input.Pending) > 0 {
+		builder.WriteString("- 当前挂单（尚未成交，已占用资金或股数）：\n")
+		for _, order := range input.Pending {
+			remaining := order.Quantity - order.FilledQuantity
+			if remaining <= 0 {
+				continue
+			}
+			fmt.Fprintf(&builder, "  - %s %s %s %d 股 @%.2f（%s）\n",
+				order.Symbol, order.Name, sideLabel(order.Side), remaining, order.LimitPrice, orderStatusLabel(order.Status))
+		}
+		builder.WriteString("  说明：这些标的已有挂单，本轮不要为它们提交同方向的新建议；要改主意请等成交，或先撤单再重新计划。\n")
+	}
+
 	if input.Market.Evaluated {
 		builder.WriteString("\n## 三、市场环境（确定性统计，不是模型观点）\n")
 		for _, note := range input.Market.Notes {
@@ -132,7 +171,31 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	// "上次止损的都亏了" 理解成 "这次不要止损"。
 	builder.WriteString("经验只说明过去发生过什么，不构成对本轮的指令。每一笔仍要独立判断，止损纪律不因历史统计而放宽。\n")
 
-	builder.WriteString("\n## 五、行情快照（唯一可用数据源）\n")
+	// 这一段是"闭环"的关键：把模型自己的历史意图与系统的否决意见送回输入端。
+	// 只写"被拦了"不够，必须同时给出原始意图与拦截代码，模型才知道该改什么：
+	// 是换标的、降权重，还是这个方向今天根本不该碰。
+	if len(input.Blocks) > 0 {
+		builder.WriteString("\n## 五、你最近被拦下的建议（不要原样重复）\n")
+		for _, block := range input.Blocks {
+			detail := ""
+			if block.Quant > 0 {
+				detail = fmt.Sprintf("，当时拟 %s %d 股 @%.2f", sideLabel(block.Side), block.Quant, block.Price)
+			} else if block.Weight > 0 {
+				detail = fmt.Sprintf("，当时目标权重 %.1f%%", block.Weight)
+			}
+			repeat := ""
+			if block.Repeat > 1 {
+				repeat = fmt.Sprintf("（同一处已重复 %d 次）", block.Repeat)
+			}
+			fmt.Fprintf(&builder, "- %s %s%s：被「%s」拦下——%s%s\n",
+				block.Symbol, block.Name, detail, firstNonEmpty(block.Code, "未记录规则"),
+				clipRunes(block.Reason, 80), repeat)
+		}
+		builder.WriteString("原样再提一次只会再被拦一次，并浪费本轮唯一的计划名额。请据此调整：换标的、降权重，或本轮放弃这个方向。\n")
+		builder.WriteString("如果认为拦截本身有误（例如行业分类不对），请在 summary 中说明，不要用改代码或改数量的方式绕过。\n")
+	}
+
+	builder.WriteString("\n## 六、行情快照（唯一可用数据源）\n")
 	builder.WriteString("| 代码 | 名称 | 现价 | 昨收 | 涨跌幅 | 最高 | 最低 | 成交额(元) | 涨停价 | 跌停价 |\n")
 	builder.WriteString("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
 	watch := map[string]bool{}
@@ -206,15 +269,15 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	}
 
 	if strings.TrimSpace(input.Notes) != "" {
-		fmt.Fprintf(&builder, "\n## 六、补充材料\n%s\n", strings.TrimSpace(input.Notes))
+		fmt.Fprintf(&builder, "\n## 七、补充材料\n%s\n", strings.TrimSpace(input.Notes))
 	}
 
-	builder.WriteString("\n## 七、判断要求\n")
+	builder.WriteString("\n## 八、判断要求\n")
 	builder.WriteString("每条建议必须区分四件事：已发生且可核对的事实、尚未兑现的预期、下单的确认条件、判断失效的条件。\n")
 	builder.WriteString("不要在 thesis 里堆砌形容词；如果某个判断缺少数据支持，直接标注「待验证」并降低权重或放弃该笔。\n")
 	builder.WriteString("优先考虑流动性与风险回报比，而不是题材热度。没有把握时允许空仓。\n\n")
 
-	builder.WriteString("## 八、输出格式\n")
+	builder.WriteString("## 九、输出格式\n")
 	builder.WriteString("只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字、不要注释：\n")
 	builder.WriteString(`{
   "regime": "进攻 | 防守 | 观望",
@@ -240,4 +303,25 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	builder.WriteString("\n卖出示例：side 为 sell，使用 \"sell_fraction_percent\": 50 表示卖出可卖数量的一半；此字段与 target_weight_percent 互斥。\n")
 	builder.WriteString("confidence 取 0 到 1 之间的小数。orders 可以为空数组。\n")
 	return builder.String()
+}
+
+// orderStatusLabel 把委托状态说成中文。
+// 提示词里出现 "partially_filled" 这种内部枚举，模型会把它当成标的名的一部分。
+func orderStatusLabel(status OrderStatus) string {
+	switch status {
+	case OrderStatusPending:
+		return "待成交"
+	case OrderStatusPartial:
+		return "部分成交"
+	case OrderStatusFilled:
+		return "已成交"
+	case OrderStatusCancelled:
+		return "已撤单"
+	case OrderStatusRejected:
+		return "已拒绝"
+	case OrderStatusExpired:
+		return "已失效"
+	default:
+		return string(status)
+	}
 }
