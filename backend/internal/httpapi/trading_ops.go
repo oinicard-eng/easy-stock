@@ -216,3 +216,50 @@ func (s *Server) tradingReportSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": order})
 }
+
+// tradingRisk 返回组合级风险状态：净值高点、回撤、总闸。
+//
+// 它与 health 的区别：health 是"系统还能不能自己跑"，risk 是"账户现在处在
+// 什么保护档位"。监控要看前者，交易员看后者。
+func (s *Server) tradingRisk(w http.ResponseWriter, r *http.Request) {
+	if s.trading == nil {
+		writeError(w, http.StatusServiceUnavailable, "交易服务不可用")
+		return
+	}
+	state, control, err := s.trading.RiskView(r.Context(), r.URL.Query().Get("account_id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+		"drawdown": state,
+		"control":  control,
+	}})
+}
+
+// tradingDrawdownRelease 人工解除回撤熔断，必须带原因。
+//
+// 与 breaker/reset 分开而不是合并成一个"解除"按钮：两者解除的是不同事实，
+// 一个是"今天亏够了"，一个是"距高点掉太多"。合并后事件流里只会出现
+// 一句"已解除"，事后无法判断当时按下的是哪一条防线。
+func (s *Server) tradingDrawdownRelease(w http.ResponseWriter, r *http.Request) {
+	if s.trading == nil {
+		writeError(w, http.StatusServiceUnavailable, "交易服务不可用")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	var body struct {
+		AccountID string `json:"account_id"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	state, err := s.trading.ReleaseDrawdown(r.Context(), body.AccountID, body.Reason)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": state})
+}

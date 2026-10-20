@@ -46,19 +46,22 @@ type Heartbeat struct {
 // Health 是一次健康自检的结果。它只读库、不拉行情：
 // 健康检查本身必须是廉价的，否则它自己会成为新的故障点。
 type Health struct {
-	Status        string        `json:"status"`
-	CheckedAt     time.Time     `json:"checked_at"`
-	UptimeSeconds float64       `json:"uptime_seconds"`
-	Channel       string        `json:"channel"`
-	AccountID     string        `json:"account_id"`
-	Autopilot     Heartbeat     `json:"autopilot"`
-	Positions     int           `json:"positions"`
-	OpenOrders    int           `json:"open_orders"`
-	ReservedCash  float64       `json:"reserved_cash"`
-	Ledger        LedgerHealth  `json:"ledger"`
-	Alerts        AlertHealth   `json:"alerts"`
-	Breaker       string        `json:"breaker,omitempty"`
-	Issues        []HealthIssue `json:"issues"`
+	Status        string       `json:"status"`
+	CheckedAt     time.Time    `json:"checked_at"`
+	UptimeSeconds float64      `json:"uptime_seconds"`
+	Channel       string       `json:"channel"`
+	AccountID     string       `json:"account_id"`
+	Autopilot     Heartbeat    `json:"autopilot"`
+	Positions     int          `json:"positions"`
+	OpenOrders    int          `json:"open_orders"`
+	ReservedCash  float64      `json:"reserved_cash"`
+	Ledger        LedgerHealth `json:"ledger"`
+	Alerts        AlertHealth  `json:"alerts"`
+	Breaker       string       `json:"breaker,omitempty"`
+	// Drawdown 是组合级回撤状态。它不属于"今日熔断"：日亏次日归零，
+	// 回撤会一直压着买入，直到净值回到高点附近或人工解除。
+	Drawdown RiskState     `json:"drawdown"`
+	Issues   []HealthIssue `json:"issues"`
 }
 
 // AlertHealth 是告警通道自身的状态。
@@ -166,6 +169,15 @@ func (s *Service) Health(ctx context.Context, accountID string, beat Heartbeat) 
 	if state, stateErr := s.store.GetDayState(ctx, accountID, TradingDay(now)); stateErr == nil && state.Tripped() {
 		health.Breaker = state.Breaker
 	}
+	if risk, riskErr := s.store.GetRiskState(ctx, accountID); riskErr == nil {
+		health.Drawdown = risk
+	} else {
+		health.Issues = append(health.Issues, HealthIssue{
+			Code:     "drawdown.read_failed",
+			Severity: EventSeverityWarning,
+			Message:  fmt.Sprintf("读取回撤状态失败：%v", riskErr),
+		})
+	}
 
 	s.collectAlertHealth(ctx, &health, accountID, now)
 	s.assessHealth(&health, now)
@@ -242,6 +254,15 @@ func (s *Service) assessHealth(health *Health, now time.Time) {
 		add("breaker."+health.Breaker, EventSeverityWarning, "当日已熔断（%s），买入被禁止", breakerLabel(health.Breaker))
 	}
 
+	// 回撤熔断：状态是"账户在保护中"，不是"系统故障"，所以只报警告。
+	// 但它必须出现在健康条里——否则账户悄悄停止买入三天，人只会以为模型没找到机会。
+	if health.Drawdown.Paused() {
+		add("drawdown."+strings.TrimPrefix(health.Drawdown.Level, "drawdown."), EventSeverityWarning,
+			"净值回撤 %.2f%%（高点 %.2f → 现值 %.2f）已触发%s，买入暂停%s",
+			health.Drawdown.DrawdownPercent, health.Drawdown.PeakEquity, health.Drawdown.Equity,
+			drawdownLevelLabel(health.Drawdown.Level), drawdownReleaseHint(health.Drawdown))
+	}
+
 	// 告警投递全失败：系统可能一切正常，但"出事时没人会知道"。
 	// 这不算 critical——交易本身没坏；但它必须出现在 warning 里，
 	// 否则这套无人值守在真正需要它的那一天会安静地失效。
@@ -275,6 +296,16 @@ func breakerLabel(code string) string {
 	default:
 		return code
 	}
+}
+
+// drawdownReleaseHint 说明这一档怎么才能解除。两条路径完全不同：
+// 警戒线会随净值回升自动解除，停止线必须人工确认——不写清楚，
+// 人就会一直等一个不会自己消失的保护。
+func drawdownReleaseHint(state RiskState) string {
+	if state.Level == DrawdownLevelStop {
+		return "，需人工确认后解除"
+	}
+	return fmt.Sprintf("，回撤回到 %.2f%% 以内自动解除", state.Policy.ReleasePercent)
 }
 
 func fallback(value, other string) string {

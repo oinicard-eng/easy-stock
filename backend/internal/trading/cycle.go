@@ -59,6 +59,9 @@ const (
 	// 防守线不受门控限制，记录它是为了让日志能看出"这轮检查过、没触发"。
 	GateProtective = "guard.positions"
 	GateReview     = "review.daily"
+	// GateDrawdown 是组合级回撤闸门。它与 gate.breaker 并列而不是合并：
+	// 日亏熔断看当天，回撤看历史高点，两者同时存在时才拦得住"慢刀子"。
+	GateDrawdown = "drawdown.level"
 )
 
 // Cycle 是一轮自动交易的完整记录。它是「交易员日志」的主键：
@@ -82,6 +85,9 @@ type Cycle struct {
 	// 否则事后无法复算"当时到底亏了多少才触发的"。
 	DayStartEquity   float64 `json:"day_start_equity"`
 	DayChangePercent float64 `json:"day_change_percent"`
+	// DrawdownPercent 是本轮观察到的组合回撤（相对净值高点）。
+	// 它与 DayChangePercent 并列记录：一个是"今天"，一个是"从最好时起"。
+	DrawdownPercent float64 `json:"drawdown_percent,omitempty"`
 	// Orders 是裁决通过并落库的订单数；Filled 是本轮结束时已成交的笔数。
 	Orders  int `json:"orders"`
 	Filled  int `json:"filled"`
@@ -230,6 +236,9 @@ type AutopilotStatus struct {
 	LastCycle *Cycle        `json:"last_cycle,omitempty"`
 	Today     DayState      `json:"today"`
 	Breakers  []BreakerView `json:"breakers"`
+	// Risk 是组合级风险状态（净值高点与回撤）。它跨日存在，
+	// 不能由 Today 推导，所以单独给一份。
+	Risk RiskState `json:"risk"`
 	// NextRunAt 是下一次调度时间；关闭时为空。
 	NextRunAt   *time.Time `json:"next_run_at,omitempty"`
 	CyclesToday int        `json:"cycles_today"`

@@ -31,6 +31,11 @@ const (
 	EventBrokerRejected     = "broker.rejected"
 	EventQuoteFailed        = "quote.failed"
 	EventKillSwitch         = "control.kill_switch"
+	// 回撤熔断的三个事件。它们是"慢刀子"的唯一留痕：
+	// 日亏熔断次日自动失效，回撤不会，所以解除也必须有一条记录。
+	EventDrawdownWarn    = "drawdown.warn"
+	EventDrawdownStop    = "drawdown.stop"
+	EventDrawdownRelease = "drawdown.release"
 )
 
 // Event 是一条运行事件。Payload 存结构化补充信息（标的、金额、订单号），

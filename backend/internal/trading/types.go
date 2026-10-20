@@ -64,6 +64,10 @@ const (
 	PlanStatusExecuted PlanStatus = "executed"
 	// PlanStatusRejected 表示用户主动放弃该计划。
 	PlanStatusRejected PlanStatus = "rejected"
+	// PlanStatusSkipped 表示本轮输入与上次模型调用时完全一致，刻意没有调用模型。
+	// 它与 failed 必须分开：跳过是系统在省钱，失败是系统坏了，混在一起会让
+	// 失败率虚高，最后没人再看那个数字。
+	PlanStatusSkipped PlanStatus = "skipped"
 	// PlanStatusFailed 表示生成或校验失败。
 	PlanStatusFailed PlanStatus = "failed"
 )
@@ -214,12 +218,12 @@ type Order struct {
 	RejectReason string     `json:"reject_reason,omitempty"`
 	// RejectCode 是拦截规则的代码（如 sector.weight）。只存中文原因不存代码，
 	// 下一轮提示词就只能原样复述一句人话，模型无法据此判断"该改什么"。
-	RejectCode string `json:"reject_code,omitempty"`
-	Thesis       string     `json:"thesis,omitempty"`
-	Invalidation string     `json:"invalidation,omitempty"`
-	Confidence   float64    `json:"confidence,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	RejectCode   string    `json:"reject_code,omitempty"`
+	Thesis       string    `json:"thesis,omitempty"`
+	Invalidation string    `json:"invalidation,omitempty"`
+	Confidence   float64   `json:"confidence,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // IsOpen 表示该订单仍可能占用资金与可卖数量。
@@ -310,10 +314,13 @@ type Plan struct {
 	Verdicts []policy.Verdict `json:"verdicts"`
 	// Exposure 记录决策前后的仓位与预算，回答"为什么只买了这么点"。
 	Exposure *Exposure `json:"exposure,omitempty"`
-	Orders   []Order   `json:"orders"`
-	Issues   []Issue   `json:"issues,omitempty"`
-	Snapshot Snapshot  `json:"snapshot"`
-	Rules    RiskRules `json:"rules"`
+	// RiskReview 是计划级风险复核报告：它从组合视角回答"这一整套方案安全吗"。
+	// 与 Verdicts 的区别：裁决是逐笔的通过/拒绝，复核是整体额度的余量。
+	RiskReview *PlanRiskReview `json:"risk_review,omitempty"`
+	Orders     []Order         `json:"orders"`
+	Issues     []Issue         `json:"issues,omitempty"`
+	Snapshot   Snapshot        `json:"snapshot"`
+	Rules      RiskRules       `json:"rules"`
 	// Research 是生成计划前的调研记录：查了什么、看到什么、得出什么事实结论。
 	// 它不是计划的一部分，而是计划的依据；放在这里是为了让"为什么这么买"
 	// 能和计划一起被打开，而不是散落在另一张表里等人去拼。

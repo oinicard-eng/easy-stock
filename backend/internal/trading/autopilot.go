@@ -522,6 +522,24 @@ func (a *Autopilot) RunCycle(ctx context.Context, trigger CycleTrigger) (Cycle, 
 	cycle.DayStartEquity = state.StartEquity
 	cycle.DayChangePercent = percentChange(state.StartEquity, account.Equity)
 
+	// 5.5 组合级回撤观察。与日亏熔断分开算：
+	// 日亏每天零点归零，连续阴跌两周的账户永远不会触发它；回撤跨日累计。
+	// 这里只观察、落库、按需按下暂停买入，真正的拦截仍由 control 与裁决层执行——
+	// 同一个判断只留一条执行路径，否则"熔断了但计划还在买"会再次出现。
+	if riskState, riskErr := a.service.ObserveEquity(ctx, accountID, account.Equity, now); riskErr != nil {
+		cycle.Notes = append(cycle.Notes, fmt.Sprintf("回撤观察失败：%v", riskErr))
+	} else {
+		cycle.DrawdownPercent = riskState.DrawdownPercent
+		if riskState.Paused() {
+			cycle.Gates = append(cycle.Gates, CycleGate{Code: GateDrawdown, Label: "净值回撤", Open: false,
+				Detail: fmt.Sprintf("%s：从高点 %.2f 回撤 %.2f%%", drawdownLevelLabel(riskState.Level),
+					riskState.PeakEquity, riskState.DrawdownPercent)})
+		} else {
+			cycle.Gates = append(cycle.Gates, CycleGate{Code: GateDrawdown, Label: "净值回撤", Open: true,
+				Detail: fmt.Sprintf("回撤 %.2f%%，警戒线 %.2f%%", riskState.DrawdownPercent, riskState.Policy.WarnPercent)})
+		}
+	}
+
 	// 6. 熔断：用当日基准权益判断，而不是用"从最高点回撤"。
 	// 日亏口径与人的直觉一致（今天亏了多少），也不会因为盘中新高而把亏损藏起来。
 	state = a.checkBreaker(ctx, state, account.Equity, config, now)
@@ -610,6 +628,8 @@ func (a *Autopilot) RunCycle(ctx context.Context, trigger CycleTrigger) (Cycle, 
 		TraderProfile: config.TraderProfile,
 		Horizon:       config.Horizon,
 		buyBlock:      buyBlock,
+		// 只有定时轮次允许跳过"什么都没变"的一轮；人工触发必须真的问一次模型。
+		skipOnNoChange: automatic,
 	}
 	plan, planErr := a.service.RunPlanSync(ctx, request, cycle.ID)
 	cycle.PlanID = plan.ID
@@ -620,6 +640,9 @@ func (a *Autopilot) RunCycle(ctx context.Context, trigger CycleTrigger) (Cycle, 
 	switch {
 	case errors.Is(planErr, ErrPlanRunning):
 		return finish(CycleStatusSkipped, "另有一轮正在生成计划，本轮让位"), nil
+	case errors.Is(planErr, ErrNoMaterialChange):
+		// 输入没变就不问模型。这是一条正常结论（省下一次调用），不是故障。
+		return finish(CycleStatusSkipped, plan.ErrorMessage), nil
 	case planErr != nil && plan.DecisionID == "":
 		// 连裁决都没产生，说明在取数或模型阶段就断了：这是真失败。
 		return finish(CycleStatusFailed, plan.ErrorMessage), planErr
@@ -652,6 +675,13 @@ func (a *Autopilot) RunCycle(ctx context.Context, trigger CycleTrigger) (Cycle, 
 		cycle.DayChangePercent = percentChange(state.StartEquity, after.Equity)
 		state = a.checkBreaker(ctx, state, after.Equity, config, now)
 		cycle.Breaker = state.Breaker
+		// 成交后净值可能已经跌出新低：不在这里复核，回撤要到下一轮才被发现，
+		// 而下一轮开始时可能已经又跌了一段。
+		if riskState, riskErr := a.service.ObserveEquity(ctx, accountID, after.Equity, now); riskErr == nil {
+			cycle.DrawdownPercent = riskState.DrawdownPercent
+		} else {
+			cycle.Notes = append(cycle.Notes, fmt.Sprintf("回撤复核失败：%v", riskErr))
+		}
 	}
 	if cycle.EquityAfter == 0 {
 		cycle.EquityAfter = cycle.EquityBefore
@@ -851,6 +881,13 @@ func (a *Autopilot) Status(ctx context.Context, accountID string) (AutopilotStat
 	if used, err := a.store.CountCyclesSince(ctx, accountID, a.dayStart(now)); err == nil {
 		status.CyclesToday = used
 	}
+	// 回撤状态是跨日事实，必须单独读出来放进状态：
+	// 它不在 DayState 里，前端只看当日熔断会漏掉"从高点掉了 10%"这件事。
+	risk, riskErr := a.store.GetRiskState(ctx, accountID)
+	if riskErr != nil {
+		a.logf("event=autopilot_risk_state_failed err=%v", riskErr)
+	}
+	status.Risk = risk
 	status.Breakers = []BreakerView{
 		{
 			Code:    BreakerDailyLoss,
@@ -865,6 +902,14 @@ func (a *Autopilot) Status(ctx context.Context, accountID string) (AutopilotStat
 			Armed:   true,
 			Tripped: state.Breaker == BreakerStopStreak,
 			Detail:  fmt.Sprintf("当日已连续止损 %d 笔，达到 %d 笔即熔断", state.StopStreak, stopStreakLimit),
+		},
+		{
+			Code:    "drawdown",
+			Label:   fmt.Sprintf("回撤熔断（-%.1f%% 警戒 / -%.1f%% 停止）", risk.Policy.WarnPercent, risk.Policy.StopPercent),
+			Armed:   risk.PeakEquity > 0,
+			Tripped: risk.Tripped(),
+			Detail: fmt.Sprintf("高点 %.2f、现值 %.2f，回撤 %.2f%%%s", risk.PeakEquity, risk.Equity,
+				risk.DrawdownPercent, drawdownSuffix(risk)),
 		},
 	}
 	return status, nil

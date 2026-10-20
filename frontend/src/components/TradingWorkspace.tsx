@@ -16,6 +16,7 @@ import {
 	RefreshCw,
 	Scale,
 	ShieldAlert,
+	ShieldCheck,
 	Sparkles,
 	Target,
 	Timer,
@@ -52,6 +53,7 @@ import {
 	matchPendingOrders,
 	reconcileTradingAccount,
 	rejectTradePlan,
+	releaseTradingDrawdown,
 	resetTradingBreaker,
 	resetTradingAccount,
 	runTradingCycle,
@@ -74,6 +76,7 @@ import {
 	type TradeCycle,
 	type TradeChannelInfo,
 	type TradeDecision,
+	type TradeDrawdownState,
 	type TradeEvent,
 	type TradeHealth,
 	type TradeLesson,
@@ -84,6 +87,7 @@ import {
 	type TradeOrder,
 	type TradePerformance,
 	type TradePlan,
+	type TradePlanRiskReview,
 	type TradePosition,
 	type TradeResearch,
 	type TradeReview,
@@ -320,6 +324,48 @@ const verdictScopeText: Record<string, string> = {
 	position: '持仓',
 };
 
+const reviewRoleText: Record<string, string> = {
+	PROPOSE: '提议',
+	EVIDENCE: '取证',
+	VETO: '否决',
+	DECIDE: '裁决',
+	EXECUTE: '执行',
+};
+const reviewLevelText: Record<string, string> = { pass: '通过', warn: '留意', block: '越界' };
+
+/**
+ * 计划级风险复核：从组合视角回答"这一整套方案安全吗"。
+ *
+ * 它与下面的裁决列表不是同一件事：裁决是逐笔的通过/拒绝（这笔为什么被拒），
+ * 复核是整体额度的余量（六笔各合规、合起来是否压在同一个行业）。
+ * 每条都带角色标签，让人一眼看出这条结论是模型提的、代码否的，还是账本执行的。
+ */
+function RiskReviewBlock({ review }: { review: TradePlanRiskReview }) {
+	const blocked = review.items.filter((item) => item.level === 'block').length;
+	const warned = review.items.filter((item) => item.level === 'warn').length;
+	return (
+		<div className={`trading-review ${review.verdict}`}>
+			<div className="trading-review-head">
+				<ShieldCheck size={15} />
+				<strong>风险复核</strong>
+				<span className={`trading-review-verdict ${review.verdict}`}>{reviewLevelText[review.verdict] ?? review.verdict}</span>
+				<span className="trading-subtle">
+					{review.items.length} 项检查 · 越界 {blocked} · 留意 {warned}
+				</span>
+			</div>
+			<ul className="trading-review-items">
+				{review.items.map((item, index) => (
+					<li key={`${item.code}-${index}`} className={item.level}>
+						<span className={`trading-role ${item.role.toLowerCase()}`}>{reviewRoleText[item.role] ?? item.role}</span>
+						<code className="trading-verdict-code">{item.code}</code>
+						<span className="trading-review-message">{item.message}</span>
+					</li>
+				))}
+			</ul>
+		</div>
+	);
+}
+
 /**
  * 裁决面板：把"模型想做什么、守卫允许什么、最后下了什么单"摊开。
  * 它比一串返回消息更有用——消息告诉你有事发生，裁决告诉你为什么。
@@ -377,6 +423,7 @@ function DecisionPanel({ plan }: { plan: TradePlan }) {
 					) : null}
 				</div>
 			) : null}
+			{plan.risk_review ? <RiskReviewBlock review={plan.risk_review} /> : null}
 			<ul className="trading-verdicts">
 				{shown.map((verdict, index) => (
 					<li key={`${verdict.code}-${verdict.symbol ?? ''}-${index}`} className={verdict.level}>
@@ -969,6 +1016,24 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 		}
 	};
 
+	// 回撤熔断与当日熔断是两条不同的防线，解除也必须是两个入口：
+	// 合并成一个按钮，事件流里就分不清当时按下的是哪一条。
+	const handleReleaseDrawdown = async () => {
+		if (!config) return;
+		const reason = window.prompt('解除回撤熔断的原因（解除后高点会重置为当前净值）：', '');
+		if (!reason || !reason.trim()) return;
+		setAutopilotBusy(true);
+		try {
+			await releaseTradingDrawdown(config, reason.trim());
+			setMessage('回撤熔断已解除，净值高点已重置为当前值');
+			await Promise.all([loadAutopilot(), loadAccount(), loadOps()]);
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : '解除回撤熔断失败');
+		} finally {
+			setAutopilotBusy(false);
+		}
+	};
+
 	const openPlanById = async (planId: string) => {
 		if (!config) return;
 		try {
@@ -1060,6 +1125,7 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 				onConfigure={(patch) => void handleAutopilot(patch)}
 				onRun={() => void handleRunCycle()}
 				onResetBreaker={() => void handleResetBreaker()}
+				onReleaseDrawdown={() => void handleReleaseDrawdown()}
 			/>
 
 			<HealthBar health={health} channel={channel} onRefresh={() => void loadOps()} />
@@ -1708,15 +1774,18 @@ type AutopilotPanelProps = {
 	onConfigure: (patch: Parameters<typeof configureTradingAutopilot>[1]) => void;
 	onRun: () => void;
 	onResetBreaker: () => void;
+	onReleaseDrawdown: () => void;
 };
 
 // 自动循环面板：把"开关、闸门、熔断"三件事放在同一屏。
 // 它们是同一条链路上的连续环节，分散在三处会让人误以为"开关打开就等于会交易"。
-function AutopilotPanel({ status, busy, cycleBusy, onConfigure, onRun, onResetBreaker }: AutopilotPanelProps) {
+function AutopilotPanel({ status, busy, cycleBusy, onConfigure, onRun, onResetBreaker, onReleaseDrawdown }: AutopilotPanelProps) {
 	const config = status?.config;
 	const today = status?.today;
 	const tripped = Boolean(today?.breaker);
 	const last = status?.last_cycle;
+	const risk = status?.risk;
+	const drawdownStopped = risk?.level === 'drawdown.stop';
 
 	return (
 		<section className="trading-autopilot">
@@ -1733,6 +1802,11 @@ function AutopilotPanel({ status, busy, cycleBusy, onConfigure, onRun, onResetBr
 					{tripped && (
 						<button type="button" className="trading-ghost danger" onClick={onResetBreaker} disabled={busy}>
 							解除熔断
+						</button>
+					)}
+					{drawdownStopped && (
+						<button type="button" className="trading-ghost danger" onClick={onReleaseDrawdown} disabled={busy}>
+							解除回撤熔断
 						</button>
 					)}
 				</div>
@@ -1826,6 +1900,22 @@ function AutopilotPanel({ status, busy, cycleBusy, onConfigure, onRun, onResetBr
 							</div>
 						</div>
 					)}
+
+					{risk && risk.peak_equity > 0 ? (
+						<div className={`trading-drawdown ${risk.level === 'drawdown.stop' ? 'stop' : risk.level === 'drawdown.warn' ? 'warn' : 'ok'}`}>
+							<span>净值回撤</span>
+							<strong>{risk.drawdown_percent.toFixed(2)}%</strong>
+							<span className="trading-subtle">
+								高点 {formatMoney(risk.peak_equity)} → 现值 {formatMoney(risk.equity)}
+								{' · '}警戒 {risk.policy.warn_percent.toFixed(1)}% / 停止 {risk.policy.stop_percent.toFixed(1)}%
+								{risk.level === 'drawdown.stop'
+									? ' · 已触发停止线，买入暂停，需人工解除'
+									: risk.level === 'drawdown.warn'
+										? ` · 已触发警戒线，回到 ${risk.policy.release_percent.toFixed(1)}% 以内自动解除`
+										: ''}
+							</span>
+						</div>
+					) : null}
 
 					<div className="trading-breakers">
 						{(status?.breakers ?? []).map((breaker) => (
@@ -2087,6 +2177,9 @@ function HealthBar({
 					: '自动循环未启动'}
 				{' · '}挂单 {health.open_orders}
 				{' · '}账本 {health.ledger.ok ? '一致' : `漂移 ¥${formatMoney(health.ledger.drift)}`}
+				{health.drawdown && health.drawdown.peak_equity > 0
+					? ` · 回撤 ${health.drawdown.drawdown_percent.toFixed(2)}%${health.drawdown.level ? '（已暂停买入）' : ''}`
+					: ''}
 				{health.alerts?.configured
 					? ` · 告警 ${health.alerts.channels.join('/')}${health.alerts.failed_24h > 0 ? `（24h 失败 ${health.alerts.failed_24h}）` : ''}`
 					: ' · 告警未配置'}
@@ -2239,6 +2332,14 @@ function TimelinePanel({
 							<span className={`trading-timeline-tag ${entry.category.replace('.', '-')}`}>
 								{timelineCategoryText(entry.category)}
 							</span>
+							{entry.role ? (
+								<span
+									className={`trading-role ${entry.role.toLowerCase()}`}
+									title={`权限链位置：${entry.role}`}
+								>
+									{reviewRoleText[entry.role] ?? entry.role}
+								</span>
+							) : null}
 							<span className="trading-timeline-body">
 								<strong>
 									{entry.symbol ? `${entry.symbol} ` : ''}

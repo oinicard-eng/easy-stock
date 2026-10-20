@@ -53,6 +53,9 @@ type PlanRequest struct {
 	// 刻意不导出：它只能由自动循环按确定性规则注入，
 	// 若能从请求体传入，调用方就能自己"解除"熔断。
 	buyBlock *BuyBlock
+	// skipOnNoChange 只由定时轮次打开：输入与上次模型调用完全一致时跳过。
+	// 人工触发的轮次必须真的问一次模型，否则按钮看起来像坏了。
+	skipOnNoChange bool
 }
 
 type Service struct {
@@ -93,6 +96,11 @@ type Service struct {
 	// alerts 是告警投递器。为 nil 表示没有配置任何出口：
 	// 事件照常落库、健康条照常变红，但这些信息不会离开这台机器。
 	alerts *AlertManager
+
+	// change 记录上一次模型调用时的输入指纹，用于跳过"什么都没变"的轮次。
+	// 放在内存里：重启后必须重新问一次模型，停机期间发生了什么无法从指纹推出。
+	changeMu sync.Mutex
+	change   changeBaseline
 }
 
 func NewService(store *Store, gateway agent.Gateway, quotes QuoteProvider, catalog StockCatalogProvider, logger *log.Logger) *Service {
@@ -249,7 +257,8 @@ func (s *Service) recentBlocksForPrompt(ctx context.Context, accountID string) [
 	return blocks
 }
 
-func (s *Service) BrokerName() string {	if s.broker == nil {
+func (s *Service) BrokerName() string {
+	if s.broker == nil {
 		return "paper"
 	}
 	return s.broker.Name()
@@ -353,7 +362,7 @@ func (s *Service) RunPlanSync(ctx context.Context, request PlanRequest, cycleID 
 		return Plan{}, err
 	}
 	return s.generatePlan(ctx, plan.ID, plan.AccountID, watchlist, autoUniverse, request,
-		planRun{cycleID: cycleID, buyBlock: request.buyBlock})
+		planRun{cycleID: cycleID, buyBlock: request.buyBlock, skipOnNoChange: request.skipOnNoChange})
 }
 
 // preparePlan 是两条生成路径（人工 / 自动）共用的准备工作。
@@ -429,8 +438,9 @@ func (s *Service) generate(planID, accountID string, watchlist []string, autoUni
 
 // planRun 承载一次生成的环境约束：它属于哪一轮循环、本轮是否禁买。
 type planRun struct {
-	cycleID  string
-	buyBlock *BuyBlock
+	cycleID        string
+	buyBlock       *BuyBlock
+	skipOnNoChange bool
 }
 
 // generatePlan 是计划生成的全部流程：取快照 → 构建提示词 → 调模型 → 裁决 → 落库。
@@ -468,6 +478,31 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		return fail("账户总资产异常，无法计算仓位")
 	}
 
+	// 阈值先算出来：即使这一轮因为"没有变化"被跳过，计划里也要留下它依据的额度，
+	// 否则复盘时会看到一份没有上限的跳过记录。
+	rules := RulesForProfile(request.TraderProfile)
+	plan.Rules = rules
+
+	// 反馈回灌所需的两次查询提前到这里：它们同时参与变化检测。
+	// 如果留到提示词阶段才取，指纹就会漏掉"模型又被同一条规则拦了一次"，
+	// 而那恰恰是最需要再问一次的情形。
+	pending := s.openOrdersForPrompt(ctx, accountID)
+	blocks := s.recentBlocksForPrompt(ctx, accountID)
+	fingerprint := SnapshotFingerprint(snapshot, pending, blocks)
+	if skip, note := s.shouldSkipNoChange(fingerprint, time.Now(), request.skipOnNoChange); skip {
+		plan.Status = PlanStatusSkipped
+		plan.ErrorMessage = note
+		plan.UpdatedAt = time.Now().UTC()
+		if plan.Orders == nil {
+			plan.Orders = []Order{}
+		}
+		if err := s.store.SavePlan(ctx, plan); err != nil {
+			s.logf("event=trading_plan_save_failed plan=%s err=%v", planID, err)
+		}
+		s.logf("event=trading_plan_skipped plan=%s reason=no_material_change cycle=%s", planID, run.cycleID)
+		return plan, ErrNoMaterialChange
+	}
+
 	// 调研阶段：模型用只读工具自己查事实，然后才进计划提示词。
 	//
 	// 失败一律降级、不阻断：调研是增益，不是前置条件。把它做成硬前置的话，
@@ -487,8 +522,6 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		s.logf("event=trading_research_degraded plan=%s note=%s", planID, research.Note)
 	}
 
-	rules := RulesForProfile(request.TraderProfile)
-	plan.Rules = rules
 	control, controlErr := s.store.GetControl(ctx, accountID)
 	if controlErr != nil {
 		return fail(fmt.Sprintf("读取账户总闸失败：%v", controlErr))
@@ -516,8 +549,8 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		// 每条计划记录多出几 KB，而这些数字下次还能重新算出来。
 		Experience: s.Experience(ctx, accountID, 8),
 		Research:   &research,
-		Pending:    s.openOrdersForPrompt(ctx, accountID),
-		Blocks:     s.recentBlocksForPrompt(ctx, accountID),
+		Pending:    pending,
+		Blocks:     blocks,
 	})
 
 	startedAt := time.Now()
@@ -545,6 +578,9 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	if err != nil {
 		return fail(err.Error())
 	}
+	// 解析成功才算"这一轮真的问过模型"。在此之前记指纹，会把一次超时
+	// 变成接下来 20 分钟的静音——失败应该被重试，而不是被记住。
+	s.recordChange(fingerprint, planID, time.Now())
 	// 模型建议只到这里为止：往下全部是确定性判断。
 	// 决策与订单构建分成两步，是为了让"为什么没买"有结构化的答案，
 	// 而不是散落在订单的拒绝原因里靠人拼。
@@ -607,6 +643,24 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	plan.DecisionID = decision.ID
 	plan.Verdicts = decision.Verdicts
 	plan.Exposure = &decision.Exposure
+	// 计划级风险复核。放在裁决落库之前生成，因为它读的正是这一轮最终订单；
+	// 但它只读不写，不改变任何订单状态——报告与闸门必须是两件事，
+	// 否则事后无法判断"这笔单是被守卫拦的，还是被报告拦的"。
+	riskState, riskErr := s.store.GetRiskState(ctx, accountID)
+	if riskErr != nil {
+		s.logf("event=trading_risk_state_read_failed plan=%s err=%v", planID, riskErr)
+	}
+	review := BuildPlanRiskReview(RiskReviewInput{
+		Snapshot: snapshot,
+		Rules:    rules,
+		Control:  control,
+		Decision: decision,
+		Orders:   plan.Orders,
+		Risk:     riskState,
+		Research: &research,
+		Now:      time.Now().UTC(),
+	})
+	plan.RiskReview = &review
 	if plan.Orders == nil {
 		plan.Orders = []Order{}
 	}

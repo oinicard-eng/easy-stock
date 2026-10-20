@@ -845,6 +845,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/trading/reconcile", s.tradingReconcile)
 	// 运维面：健康检查给监控用，事件流给人排障用。
 	s.mux.HandleFunc("GET /api/v1/trading/health", s.tradingHealth)
+	// 风险面：回撤与总闸。它是账户级事实，与"系统健康"分开看。
+	s.mux.HandleFunc("GET /api/v1/trading/risk", s.tradingRisk)
+	s.mux.HandleFunc("POST /api/v1/trading/risk/drawdown/release", s.tradingDrawdownRelease)
 	s.mux.HandleFunc("GET /api/v1/trading/events", s.tradingEvents)
 	s.mux.HandleFunc("GET /api/v1/trading/channel", s.tradingChannel)
 	s.mux.HandleFunc("GET /api/v1/trading/alerts", s.tradingAlerts)

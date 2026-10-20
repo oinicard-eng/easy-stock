@@ -285,11 +285,11 @@ type AlertManager struct {
 	mu    sync.Mutex
 	state map[string]*alertState
 
-	ch      chan Alert
-	done    chan struct{}
-	started bool
+	ch       chan Alert
+	done     chan struct{}
+	started  bool
 	stopOnce sync.Once
-	wg      sync.WaitGroup
+	wg       sync.WaitGroup
 
 	// 计数用于自证：告警系统自己也会坏，坏的时候要能看出来。
 	sent    atomic.Int64
@@ -429,7 +429,7 @@ func shouldAlert(event Event) bool {
 		return true
 	}
 	switch event.Kind {
-	case EventAutopilotRecovered, EventLedgerDriftHealed:
+	case EventAutopilotRecovered, EventLedgerDriftHealed, EventDrawdownRelease:
 		return true
 	}
 	return false

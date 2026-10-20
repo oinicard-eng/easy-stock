@@ -2,7 +2,7 @@ import { requestJSON, type BackendConfig } from './backend';
 
 export type TradeSide = 'buy' | 'sell';
 export type TradeOrderType = 'limit' | 'market';
-export type TradePlanStatus = 'running' | 'draft' | 'executed' | 'rejected' | 'failed';
+export type TradePlanStatus = 'running' | 'draft' | 'executed' | 'rejected' | 'failed' | 'skipped';
 export type TradeOrderStatus = 'pending' | 'filled' | 'partially_filled' | 'cancelled' | 'rejected' | 'expired';
 
 export type TradeAccount = {
@@ -324,6 +324,8 @@ export type TradePlan = {
 	verdicts?: TradeVerdict[];
 	/** 决策前后的仓位与预算 */
 	exposure?: TradeExposure;
+	/** 计划级风险复核：组合视角的额度余量，不是闸门 */
+	risk_review?: TradePlanRiskReview;
 	orders: TradeOrder[];
 	issues?: TradeIssue[];
 	snapshot: {
@@ -555,6 +557,36 @@ export type TradeCycle = {
 	notes?: string[];
 };
 
+/** 组合级回撤状态。高点只增不减，解除时才重置为现值。 */
+export type TradeDrawdownState = {
+	account_id: string;
+	peak_equity: number;
+	peak_at?: string;
+	equity: number;
+	drawdown_percent: number;
+	level?: '' | 'drawdown.warn' | 'drawdown.stop';
+	policy: { warn_percent: number; stop_percent: number; release_percent: number };
+	updated_at?: string;
+};
+
+/** 复核条目：role 说明谁下的结论，level 是 pass / warn / block。 */
+export type TradeRiskReviewItem = {
+	role: string;
+	code: string;
+	level: 'pass' | 'warn' | 'block';
+	message: string;
+	metric?: number;
+	limit?: number;
+};
+
+export type TradePlanRiskReview = {
+	verdict: 'pass' | 'warn' | 'block';
+	reviewed_at: string;
+	items: TradeRiskReviewItem[];
+	summary: string[];
+	stats?: { proposed: number; accepted: number; blocked: number; adjusted: number };
+};
+
 export type TradeBreakerView = {
 	code: string;
 	label: string;
@@ -580,6 +612,8 @@ export type TradeAutopilotStatus = {
 	last_cycle?: TradeCycle;
 	today: TradeDayState;
 	breakers: TradeBreakerView[];
+	/** 组合级回撤状态。跨日存在，不能从 today 推导。 */
+	risk?: TradeDrawdownState;
 	next_run_at?: string;
 	cycles_today: number;
 };
@@ -647,6 +681,7 @@ export const tradePlanStatusText: Record<TradePlanStatus, string> = {
 	executed: '已执行',
 	rejected: '已放弃',
 	failed: '未通过',
+	skipped: '无变化跳过',
 };
 
 export const tradeOrderStatusText: Record<TradeOrderStatus, string> = {
@@ -875,6 +910,8 @@ export type TradeHealth = {
 		orphan_orders: number;
 	};
 	breaker?: string;
+	/** 组合级回撤状态：高点、现值、回撤与所处档位 */
+	drawdown: TradeDrawdownState;
 	issues: TradeHealthIssue[];
 	/** 告警通道自身状态。没人收到通知和一直没出事，从外面看是一样的。 */
 	alerts: TradeAlertHealth;
@@ -907,6 +944,29 @@ export type TradeChannelInfo = {
 	supports_cancel: boolean;
 	note: string;
 };
+
+/** 组合级风险状态：净值高点、回撤与总闸。与 health 分开：一个看账户，一个看系统。 */
+export async function fetchTradingRisk(
+	config: BackendConfig,
+	signal?: AbortSignal,
+): Promise<{ drawdown: TradeDrawdownState; control: TradeControl }> {
+	const payload = await requestJSON<{ data: { drawdown: TradeDrawdownState; control: TradeControl } }>(
+		config,
+		'/api/v1/trading/risk',
+		{ signal },
+	);
+	return payload.data;
+}
+
+/** 人工解除回撤熔断。必须给理由：这是唯一一处人推翻机器保护的入口。 */
+export async function releaseTradingDrawdown(config: BackendConfig, reason: string): Promise<TradeDrawdownState> {
+	const payload = await requestJSON<{ data: TradeDrawdownState }>(config, '/api/v1/trading/risk/drawdown/release', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason }),
+	});
+	return payload.data;
+}
 
 export async function fetchTradingHealth(config: BackendConfig, signal?: AbortSignal): Promise<TradeHealth> {
 	const payload = await requestJSON<{ data: TradeHealth }>(config, '/api/v1/trading/health', { signal });
@@ -1052,6 +1112,8 @@ export type TradeTimelineEntry = {
 	at: string;
 	category: string;
 	severity?: 'info' | 'warning' | 'critical';
+	/** 权限链位置：PROPOSE / EVIDENCE / VETO / DECIDE / EXECUTE */
+	role?: string;
 	title: string;
 	detail?: string;
 	ref_id?: string;

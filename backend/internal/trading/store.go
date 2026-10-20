@@ -191,6 +191,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateAlerts(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateRiskState(ctx); err != nil {
+		return err
+	}
 	return s.migrateReports(ctx)
 }
 

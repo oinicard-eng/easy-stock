@@ -36,8 +36,11 @@ type TimelineEntry struct {
 	At       time.Time `json:"at"`
 	Category string    `json:"category"`
 	Severity string    `json:"severity,omitempty"`
-	Title    string    `json:"title"`
-	Detail   string    `json:"detail,omitempty"`
+	// Role 是这条记录在权限链里的位置（PROPOSE / VETO / DECIDE / EXECUTE）。
+	// 它只影响展示：把"谁下的结论"标出来，回放才不必逐条推断。
+	Role   string `json:"role,omitempty"`
+	Title  string `json:"title"`
+	Detail string `json:"detail,omitempty"`
 	// RefID 指向原始记录，前端可据此跳转到详情。
 	RefID  string  `json:"ref_id,omitempty"`
 	Symbol string  `json:"symbol,omitempty"`
@@ -47,15 +50,15 @@ type TimelineEntry struct {
 // TimelineStats 是这一天的一句话摘要。
 // 它存在的意义是让人不必读完整条线就能判断"这一天值不值得细看"。
 type TimelineStats struct {
-	Cycles     int `json:"cycles"`
+	Cycles       int `json:"cycles"`
 	FailedCycles int `json:"failed_cycles"`
-	Plans      int `json:"plans"`
-	Decisions  int `json:"decisions"`
-	Orders     int `json:"orders"`
-	Filled     int `json:"filled"`
-	Blocked    int `json:"blocked"`
-	Events     int `json:"events"`
-	Reviews    int `json:"reviews"`
+	Plans        int `json:"plans"`
+	Decisions    int `json:"decisions"`
+	Orders       int `json:"orders"`
+	Filled       int `json:"filled"`
+	Blocked      int `json:"blocked"`
+	Events       int `json:"events"`
+	Reviews      int `json:"reviews"`
 	// ModelCalls / TotalTokens 回答"这一天思考花了多少钱"。
 	// 没有它，自动交易的成本会变成一个只能靠账单反推的黑箱。
 	ModelCalls  int `json:"model_calls"`
@@ -221,6 +224,7 @@ func (s *Store) collectPlans(ctx context.Context, timeline *Timeline, accountID,
 			At:       plan.CreatedAt,
 			Category: TimelinePlan,
 			Severity: planStatusSeverity(plan.Status),
+			Role:     RolePropose,
 			Title:    orderCountTitle("生成计划", len(plan.Orders), plan.Status),
 			Detail:   truncate(strings.TrimSpace(plan.Summary), 180),
 			RefID:    plan.ID,
@@ -275,6 +279,7 @@ func (s *Store) collectDecisions(ctx context.Context, timeline *Timeline, accoun
 			At:       decision.TakenAt,
 			Category: TimelineDecision,
 			Severity: decisionSeverity(decision),
+			Role:     RoleDecide,
 			Title:    title,
 			Detail:   detail,
 			RefID:    decision.ID,
@@ -317,14 +322,19 @@ func (s *Store) collectOrders(ctx context.Context, timeline *Timeline, accountID
 				sideLabel(order.Side), displayName(order.Symbol, order.Name), order.Quantity, order.LimitPrice)
 		}
 		severity := ""
+		// 被拒的委托是"代码行使否决权"的结果，标成 VETO；
+		// 其余委托是执行动作，标成 EXECUTE。两者在同一列表里但责任方不同。
+		role := RoleExecute
 		if order.Status == OrderStatusRejected {
 			title += "（被拒）"
 			severity = EventSeverityWarning
+			role = RoleVeto
 		}
 		timeline.Entries = append(timeline.Entries, TimelineEntry{
 			At:       order.CreatedAt,
 			Category: TimelineOrder,
 			Severity: severity,
+			Role:     role,
 			Title:    title,
 			Detail:   orderDetail(order),
 			RefID:    order.ID,
@@ -352,6 +362,7 @@ func (s *Store) collectOrders(ctx context.Context, timeline *Timeline, accountID
 		timeline.Entries = append(timeline.Entries, TimelineEntry{
 			At:       order.UpdatedAt,
 			Category: TimelineFill,
+			Role:     RoleExecute,
 			Title:    fmt.Sprintf("成交 %s %s", sideLabel(order.Side), displayName(order.Symbol, order.Name)),
 			Detail:   detail,
 			RefID:    order.ID,
@@ -505,6 +516,8 @@ func orderCountTitle(prefix string, count int, status PlanStatus) string {
 		label = "失败"
 	case PlanStatusRunning:
 		label = "生成中"
+	case PlanStatusSkipped:
+		label = "无变化跳过"
 	}
 	if count == 0 {
 		return prefix + "（" + label + "，无建议）"
