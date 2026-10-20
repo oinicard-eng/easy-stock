@@ -440,8 +440,8 @@ tick 每 15 秒看一眼异动，命中就立刻发起一轮。三条限制让�
 按顺序跑，全程约 3 分钟（`providers/eastmoney` 单包超时见文末说明，故排除）。
 
 ```bash
-# 1. 后端：交易域 + 接口层 + 策略包
-cd backend && go test ./internal/trading/... ./internal/httpapi/
+# 1. 后端：全量（第六批修好了 eastmoney 的挂死测试，现在可以整包跑）
+cd backend && go test ./... -timeout 600s
 
 # 2. 前端：类型 + 单测 + 生产构建
 cd frontend && npx tsc --noEmit && npx vitest run && npx vite build
@@ -456,6 +456,11 @@ curl -s -X POST http://127.0.0.1:20081/api/v1/trading/plans/<plan_id>/sandbox \
      -H 'Content-Type: application/json' -d '{"profile":"aggressive"}'
 #    期望：original/replayed 各带一套 rules 与 accepted/blocked 计数，
 #          changes 逐笔列出，notes 在结论一致时说明"差异只在额度余量"
+
+# 5. 置信度校准（第六批新增）
+curl -s http://127.0.0.1:20081/api/v1/trading/calibration
+#    期望：5 个分桶 + brier + verdict；没有平仓样本时 verdict 明确说"还没有可校准样本"，
+#          而不是给出一个 0% 的假胜率
 ```
 
 页面上对应的入口：健康条（顶部）、持仓行的「失效条件 / 预期 N 日 / 已自动减仓」、
