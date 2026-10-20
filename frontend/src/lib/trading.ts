@@ -876,6 +876,17 @@ export type TradeHealth = {
 	};
 	breaker?: string;
 	issues: TradeHealthIssue[];
+	/** 告警通道自身状态。没人收到通知和一直没出事，从外面看是一样的。 */
+	alerts: TradeAlertHealth;
+};
+
+/** 告警通道状态：配了几个出口、最近 24 小时送出去多少、失败多少。 */
+export type TradeAlertHealth = {
+	configured: boolean;
+	channels: string[];
+	sent_24h: number;
+	failed_24h: number;
+	dropped: number;
 };
 
 /** 运行事件。kind 是稳定标识，message 给人看。 */
@@ -998,4 +1009,94 @@ export async function fetchTradingMemory(config: BackendConfig, query: TradeMemo
 export async function syncTradingMemory(config: BackendConfig): Promise<{ added: number; total: number }> {
 	const payload = await requestJSON<{ data: { added: number; total: number } }>(config, '/api/v1/trading/memory/sync', { method: 'POST' });
 	return payload.data;
+}
+
+/** 一条告警投递记录。status 说明这条告警到底有没有送到人手上。 */
+export type TradeAlertRecord = {
+	id: number;
+	account_id: string;
+	severity: 'info' | 'warning' | 'critical';
+	kind: string;
+	symbol?: string;
+	message: string;
+	channel?: string;
+	status: 'sent' | 'failed' | 'suppressed';
+	error?: string;
+	merged: number;
+	created_at: string;
+};
+
+export type TradeAlertsResult = {
+	records: TradeAlertRecord[];
+	channels: string[];
+	stats: Record<string, number>;
+};
+
+export async function fetchTradingAlerts(config: BackendConfig, limit = 50, signal?: AbortSignal): Promise<TradeAlertsResult> {
+	const payload = await requestJSON<{ data: TradeAlertsResult }>(config, `/api/v1/trading/alerts?limit=${limit}`, { signal });
+	return {
+		records: payload.data?.records ?? [],
+		channels: payload.data?.channels ?? [],
+		stats: payload.data?.stats ?? {},
+	};
+}
+
+/** 主动发一条测试告警，验证出口配置是否真的能用。 */
+export async function testTradingAlert(config: BackendConfig): Promise<{ delivered: string[]; error?: string }> {
+	const payload = await requestJSON<{ data: { delivered: string[]; error?: string } }>(config, '/api/v1/trading/alerts/test', { method: 'POST' });
+	return payload.data;
+}
+
+/** 时间线上的一个节点。category 决定分组与配色，severity 决定是否需要高亮。 */
+export type TradeTimelineEntry = {
+	at: string;
+	category: string;
+	severity?: 'info' | 'warning' | 'critical';
+	title: string;
+	detail?: string;
+	ref_id?: string;
+	symbol?: string;
+	amount?: number;
+};
+
+export type TradeTimelineStats = {
+	cycles: number;
+	failed_cycles: number;
+	plans: number;
+	decisions: number;
+	orders: number;
+	filled: number;
+	blocked: number;
+	events: number;
+	reviews: number;
+	model_calls: number;
+	total_tokens: number;
+};
+
+export type TradeTimeline = {
+	day: string;
+	account_id: string;
+	from: string;
+	to: string;
+	stats: TradeTimelineStats;
+	entries: TradeTimelineEntry[];
+	/** 某张表读失败时的降级说明。非空表示这条线不完整。 */
+	notes?: string[];
+};
+
+export async function fetchTradingTimeline(config: BackendConfig, day: string, signal?: AbortSignal): Promise<TradeTimeline> {
+	const payload = await requestJSON<{ data: TradeTimeline }>(config, `/api/v1/trading/timeline?day=${encodeURIComponent(day)}`, { signal });
+	return {
+		day: payload.data?.day ?? day,
+		account_id: payload.data?.account_id ?? '',
+		from: payload.data?.from ?? '',
+		to: payload.data?.to ?? '',
+		stats: payload.data?.stats ?? {
+			cycles: 0, failed_cycles: 0, plans: 0, decisions: 0,
+			orders: 0, filled: 0, blocked: 0, events: 0, reviews: 0,
+			model_calls: 0, total_tokens: 0,
+		},
+		entries: payload.data?.entries ?? [],
+		notes: payload.data?.notes,
+	};
 }

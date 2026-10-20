@@ -71,6 +71,9 @@ func (s *Store) migrateEvents(ctx context.Context) error {
 //
 // 事件写失败不该中断主流程：熔断已经生效了，却因为"记日志失败"让整个循环报错，
 // 是把可观测性放在了正确性之上。所以调用方一律忽略这里的 error，只把失败打回日志。
+//
+// 写库成功后同步触达 eventSink。钩子由告警模块挂上，它内部只入队不发送，
+// 因此这里的同步调用不会把网络耗时带进交易路径。
 func (s *Store) AppendEvent(ctx context.Context, event Event) error {
 	if strings.TrimSpace(event.Kind) == "" {
 		return fmt.Errorf("事件类型不能为空")
@@ -88,7 +91,39 @@ func (s *Store) AppendEvent(ctx context.Context, event Event) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO trading_events
 		(account_id,severity,kind,message,symbol,payload_json,created_at) VALUES (?,?,?,?,?,?,?)`,
 		event.AccountID, event.Severity, event.Kind, event.Message, event.Symbol, payload, nowText(event.CreatedAt))
-	return err
+	if err != nil {
+		return err
+	}
+	s.emitEvent(event)
+	return nil
+}
+
+// SetEventSink 挂上事件外发钩子。传 nil 表示摘除。
+//
+// 钩子只能有一个：多个消费者会在同一条事件上重复告警，
+// 而"同一件事发两遍"比"没人发"更难排查。
+func (s *Store) SetEventSink(fn func(Event)) {
+	if s == nil {
+		return
+	}
+	if fn == nil {
+		s.eventSink.Store(nil)
+		return
+	}
+	s.eventSink.Store(&eventSinkHolder{fn: fn})
+}
+
+// emitEvent 调用已挂上的钩子。钩子内部必须自己保证不阻塞、不 panic：
+// 这里是交易主路径，任何向外扩散的异常都会变成"记日志把交易搞挂了"。
+func (s *Store) emitEvent(event Event) {
+	if s == nil {
+		return
+	}
+	holder := s.eventSink.Load()
+	if holder == nil || holder.fn == nil {
+		return
+	}
+	holder.fn(event)
 }
 
 // ListEvents 返回最近的事件，新的在前。kind 为空表示不过滤类型。

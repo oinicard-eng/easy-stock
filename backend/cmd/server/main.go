@@ -15,6 +15,7 @@ import (
 	"easy-stock/backend/internal/httpapi"
 	"easy-stock/backend/internal/methodology"
 	"easy-stock/backend/internal/runtimelog"
+	"easy-stock/backend/internal/trading"
 )
 
 func main() {
@@ -118,6 +119,7 @@ func main() {
 		PortfolioDBPath:          portfolioDBPath,
 		StockResearchDBPath:      stockResearchDBPath,
 		TradingDBPath:            tradingDBPath,
+		TradingAlert:             tradingAlertConfig(logDirectory),
 		RemoteDailyReviewURL:     os.Getenv("A_STOCK_DAILY_REVIEW_BASE_URL"),
 		MarketEmotionDBPath:      marketEmotionDBPath,
 		ThemeRadarDBPath:         themeRadarDBPath,
@@ -162,6 +164,19 @@ func main() {
 	if err := server.Close(); err != nil {
 		log.Printf("close persistent data: %v", err)
 	}
+}
+
+// tradingAlertConfig 组装交易告警配置。
+//
+// 文件出口默认落在日志目录：没有配 webhook 时，告警至少留一条本地痕迹，
+// 而不是只进数据库等人去翻。环境变量可以覆盖全部字段，
+// 这样部署脚本不必改代码就能接上企微或钉钉机器人。
+func tradingAlertConfig(logDirectory string) trading.AlertConfig {
+	config := trading.AlertConfigFromEnv(nil)
+	if config.LogPath == "" && strings.TrimSpace(logDirectory) != "" {
+		config.LogPath = filepath.Join(logDirectory, "trading-alerts.log")
+	}
+	return config
 }
 
 func runtimeVersion() string {

@@ -96,6 +96,7 @@ type Server struct {
 	trading                  *trading.Service
 	tradingStore             *trading.Store
 	autopilot                *trading.Autopilot
+	alertManager             *trading.AlertManager
 	stockResearchStore       *stockanalysis.ResearchStore
 	stockResearch            *stockanalysis.ResearchService
 	reviewImporter           ReviewImporter
@@ -493,6 +494,20 @@ func NewServer(config any) *Server {
 		// 自动循环只构造不启动：Start 由 main 在服务可用之后显式调用。
 		// 构造时启动会让"刚部署完就自动开始交易"变成默认行为。
 		s.autopilot = trading.NewAutopilot(s.trading, cfg.Logger)
+		// 告警外发：出口按配置逐个装上，一个都没配时仍然会构造管理器，
+		// 它会把该发的告警落库但不外送——"没有出口"和"没有告警"必须能区分开。
+		if !cfg.TradingAlert.Disabled {
+			notifiers := make([]trading.Notifier, 0, 2)
+			if cfg.TradingAlert.WebhookURL != "" {
+				notifiers = append(notifiers, trading.NewWebhookNotifier("webhook", cfg.TradingAlert.WebhookURL, cfg.TradingAlert.WebhookType))
+			}
+			if fileNotifier := trading.NewFileNotifier(cfg.TradingAlert.LogPath); fileNotifier != nil {
+				notifiers = append(notifiers, fileNotifier)
+			}
+			s.alertManager = trading.NewAlertManager(cfg.TradingStore, cfg.Logger, cfg.TradingAlert, notifiers...)
+			s.alertManager.Start()
+			s.trading.SetAlerts(s.alertManager)
+		}
 	}
 	s.stockResearch = stockanalysis.NewResearchServiceWithPreparation(cfg.StockResearchStore, s.runStockResearch, s.prepareStockResearch, s.notifyStockResearch)
 	s.portfolioInspection = portfolioinspection.NewService(cfg.PortfolioStore, usageGateway, s.analyzeStock, cfg.Logger, s.analyzeHoldingResearch)
@@ -557,6 +572,10 @@ func (s *Server) Close() error {
 	}
 	if s.autopilot != nil {
 		s.autopilot.Stop()
+	}
+	// 告警在自动循环之后停：循环退出前最后产生的事件仍然值得发出去。
+	if s.alertManager != nil {
+		s.alertManager.Stop()
 	}
 	var closeErrors []error
 	if s.notifications != nil {
@@ -645,6 +664,16 @@ func (s *Server) RunMarketEmotionScheduler(ctx context.Context) {
 func (s *Server) RunTradingAutopilot(ctx context.Context) {
 	if s.autopilot == nil {
 		return
+	}
+	// 启动时把告警出口喊出来。"没人收到通知"和"一直没出事"从外面看是一样的，
+	// 只有把出口清单打进日志，事后才能分清到底属于哪一种。
+	if s.alertManager != nil {
+		channels := s.alertManager.Channels()
+		if len(channels) == 0 {
+			s.logger.Printf("event=trading_alerts_no_channel note=告警只会落库不会外发，请配置 A_STOCK_TRADING_ALERT_WEBHOOK")
+		} else {
+			s.logger.Printf("event=trading_alerts_ready channels=%s", strings.Join(channels, ","))
+		}
 	}
 	s.autopilot.Start(ctx)
 	defer s.autopilot.Stop()
@@ -813,6 +842,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/trading/health", s.tradingHealth)
 	s.mux.HandleFunc("GET /api/v1/trading/events", s.tradingEvents)
 	s.mux.HandleFunc("GET /api/v1/trading/channel", s.tradingChannel)
+	s.mux.HandleFunc("GET /api/v1/trading/alerts", s.tradingAlerts)
+	s.mux.HandleFunc("POST /api/v1/trading/alerts/test", s.tradingAlertTest)
+	s.mux.HandleFunc("GET /api/v1/trading/timeline", s.tradingTimeline)
 	// 委托回报入口：接实盘时由券商回调或轮询器推入，ReportID 保证幂等。
 	s.mux.HandleFunc("POST /api/v1/trading/reports", s.tradingReportSubmit)
 	s.mux.HandleFunc("POST /api/v1/trading/plans", s.tradingPlanCreate)

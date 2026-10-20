@@ -101,7 +101,10 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 	block := func(order *Order, verdict policy.Verdict) {
 		order.Status = OrderStatusRejected
 		order.RejectReason = verdict.Message
-		order.Quantity = 0
+		// 刻意保留 Quantity：被拦的建议也要能回答"模型原本想买多少"。
+		// 置零会留下一条"买入 0 股"的记录，既看不懂，也让复盘无法比较
+		// "模型想买 100 股被拦"和"模型只想买 100 股但资金不够"。
+		// 下游所有计算都只看 pending 状态，因此保留数量不会造成冻结或暴露虚高。
 		order.ReservedAmount = 0
 		order.Sector = ""
 		orders = append(orders, *order)
@@ -252,6 +255,10 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 			}
 			amount := equity * item.TargetWeightPercent / 100
 			quantity := roundSharesDown(int(amount/entry), lot)
+			// 立刻回写到订单上，不能等到最后"通过"时才赋值。
+			// 后续任何一条拦截（资金、单笔风险、行业集中度）都要能带上
+			// "原本打算买多少"，否则留下的就是一条"买入 0 股"的无意义记录。
+			order.Quantity = quantity
 			if quantity < lot {
 				block(&order, policy.Verdict{
 					Code: policy.CodeSizingBelowLot, Level: policy.LevelBlock, Scope: policy.ScopeOrder,
@@ -263,6 +270,7 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 			notional := float64(quantity) * entry
 			fee := TradeFee(SideBuy, notional)
 			if notional+fee > cashLeft {
+				original := quantity
 				// 按可用资金逐手缩减，直到金额与费用都能被覆盖。
 				quantity = roundSharesDown(int(cashLeft/entry), lot)
 				for quantity >= lot {
@@ -274,6 +282,9 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 					quantity -= lot
 				}
 				if quantity < lot {
+					// 拦下来时恢复原始拟买数量：这条记录要回答的是
+					// "模型想买多少、为什么买不成"，而不是"缩减后剩 0 股"。
+					order.Quantity = original
 					block(&order, policy.Verdict{
 						Code: policy.CodeSizingReducedByCash, Level: policy.LevelBlock, Scope: policy.ScopeOrder,
 						Field: field, Symbol: order.Symbol, Metric: cashLeft,
@@ -321,6 +332,8 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 				fraction = 100
 			}
 			quantity := roundSharesDown(int(float64(sellable)*fraction/100), lot)
+			// 与买入同理：先回写，再让后面的任何拦截都带上拟卖数量。
+			order.Quantity = quantity
 			if sellable < lot {
 				block(&order, policy.Verdict{
 					Code: policy.CodePositionUnavailable, Level: policy.LevelBlock, Scope: policy.ScopePosition,

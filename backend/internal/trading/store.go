@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"easy-stock/backend/internal/sqliteutil"
@@ -23,6 +24,16 @@ const DefaultInitialCash = 100000.0
 
 type Store struct {
 	db *sql.DB
+	// eventSink 是事件外发钩子，由告警模块在启动时挂上。
+	//
+	// 用 atomic.Pointer 而不是互斥锁：它在服务启动时写一次，之后被所有
+	// goroutine 并发读，而事件写入发生在交易主路径上，不该为读一个函数指针付锁开销。
+	eventSink atomic.Pointer[eventSinkHolder]
+}
+
+// eventSinkHolder 包一层是因为 atomic.Pointer 不能安全地存 nil 函数值。
+type eventSinkHolder struct {
+	fn func(Event)
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -175,6 +186,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.migrateAgentSteps(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateAlerts(ctx); err != nil {
 		return err
 	}
 	return s.migrateReports(ctx)
@@ -523,7 +537,7 @@ func (s *Store) CreateOrders(ctx context.Context, orders []Order) ([]Order, erro
 			if err := s.reserveSellQuantityTx(ctx, tx, order.AccountID, order.Symbol, remaining, &order); err != nil {
 				order.Status = OrderStatusRejected
 				order.RejectReason = err.Error()
-				order.Quantity = 0
+				// 保留原始数量：这条记录的价值在于"当时想卖多少"，置零等于丢掉它。
 				order.UpdatedAt = time.Now().UTC()
 			}
 		}

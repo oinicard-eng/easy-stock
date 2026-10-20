@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -70,6 +71,95 @@ func (s *Server) tradingChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": s.trading.ChannelInfo()})
+}
+
+// tradingTimeline 回放某一天的时间线。
+//
+// 它把循环、计划、裁决、委托、事件、复盘按时间摊平成一条线，
+// 用于回答"那天到底发生了什么"——这是排障时最先要建立的东西。
+func (s *Server) tradingTimeline(w http.ResponseWriter, r *http.Request) {
+	if s.trading == nil {
+		writeError(w, http.StatusServiceUnavailable, "交易服务不可用")
+		return
+	}
+	query := r.URL.Query()
+	day := time.Now()
+	if raw := strings.TrimSpace(query.Get("day")); raw != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", raw, time.FixedZone("CST", 8*3600))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "day 必须是 YYYY-MM-DD")
+			return
+		}
+		day = parsed
+	}
+	timeline, err := s.trading.Timeline(r.Context(), query.Get("account_id"), day)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": timeline})
+}
+
+// tradingAlerts 返回告警投递记录，新的在前。
+//
+// 它回答的问题和 events 不同：events 说"发生了什么"，
+// alerts 说"这件事有没有送到人手上"。无人值守时后者才是关键——
+// 出事但没通知，和没出事，从外面看是一样的。
+func (s *Server) tradingAlerts(w http.ResponseWriter, r *http.Request) {
+	if s.trading == nil {
+		writeError(w, http.StatusServiceUnavailable, "交易服务不可用")
+		return
+	}
+	query := r.URL.Query()
+	limit := 100
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
+		}
+	}
+	records, err := s.trading.Store().ListAlerts(r.Context(),
+		query.Get("account_id"), query.Get("status"), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	manager := s.trading.Alerts()
+	stats := map[string]int64{}
+	channels := []string{}
+	if manager != nil {
+		stats = manager.Stats()
+		channels = manager.Channels()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+		"records":  records,
+		"channels": channels,
+		"stats":    stats,
+	}})
+}
+
+// tradingAlertTest 主动发一条测试告警。
+//
+// 没有这个入口，人配完 webhook 只能等真出事才知道配错了，
+// 而"通知配错了"恰恰是最该被立刻发现的问题。
+func (s *Server) tradingAlertTest(w http.ResponseWriter, r *http.Request) {
+	var manager *trading.AlertManager
+	if s.trading != nil {
+		manager = s.trading.Alerts()
+	}
+	if manager == nil {
+		writeError(w, http.StatusServiceUnavailable, "告警未启用")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	sent, err := manager.Test(ctx)
+	result := map[string]any{"delivered": sent}
+	if err != nil {
+		result["error"] = err.Error()
+		writeJSON(w, http.StatusBadGateway, map[string]any{"data": result})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": result})
 }
 
 // tradingReportSubmit 接收一条通道委托回报。

@@ -593,3 +593,113 @@ Memory 是单笔情境，回答"那一次发生了什么"。聚合会抹掉情�
 - 记忆在复盘时生成（T+0 收盘后），当天盘中买当天看不到自己的记忆——但 T+1 规则下
   当天也卖不掉，时效够用。
 - 资金流依赖行情总览服务实现 `SectorFlowRanking`；未实现时工具明确报"未配置"。
+
+## 八·六、告警外发与按天回放（已交付，2026-10-20）
+
+这一节补的是"系统出事时，人到底知不知道"。
+
+前五阶段把系统做得能自己跑、能自愈、能降级，但所有结论都只落在两个地方：
+数据库表、页面健康条。人不在电脑前时，这两件事等于没发生。
+**无人值守的最后一环不是"发现故障"，而是"把故障送到人手上"。**
+
+### 1. 出口与收敛分离（alerting.go）
+
+```go
+type Notifier interface {
+    Name() string
+    Notify(ctx context.Context, alert Alert) error
+}
+```
+
+- `WebhookNotifier`：企微 / 钉钉 / 通用 JSON 三种编码，一个 URL 就能用。
+- `FileNotifier`：兜底出口，追加 JSON 行到日志目录，没有 webhook 时也留痕。
+- `AlertManager`：只负责"发不发、合并多少、发完记什么"，不关心出口怎么实现。
+
+分开的理由：出口会换（短信、Slack、PagerDuty），但"什么算重复告警"的语义不该跟着变。
+
+### 2. 收敛规则
+
+| 场景 | 行为 |
+| --- | --- |
+| 冷却期内同 kind+symbol | 计数不外发，记 `suppressed` |
+| 冷却到期仍有同类 | 补发一条，带 `merged=N` 与 `summary=true` |
+| 严重度升高 | 立即突破冷却（warning → critical 不能被压掉） |
+| 出口全部失败 | 回滚冷却状态，下一条同类立刻重试 |
+| 出口部分失败 | 视为已送达，不重置冷却（不为配错的次要出口重发主通道） |
+
+关键取舍：**没送达等于没发过**。这是唯一能让"告警可靠性"可推理的假设。
+
+### 3. 事件钩子（store.go、events.go）
+
+`Store` 挂一个 `eventSink`，`AppendEvent` 写库成功后触达。
+
+挂在 Store 而不是某一个调用点，是因为事件写入有多个入口：
+自愈、日终作废、回报落账都直接调 `store.AppendEvent`，
+只挂一个入口会漏掉其余入口，而漏掉的往往正是最该告警的那几条。
+
+钩子内部只入队不发送（buffer 256 + 单 worker），所以同步调用不会把网络耗时带进交易路径。
+队列满时先丢 warning；critical 会阻塞等 2 秒再丢，并写 `event=alert_dropped`。
+
+### 4. 告警自身的可观测性
+
+- `trading_alerts` 表按出口逐条记录 `sent` / `failed` / `suppressed`，`failed` 带原文原因。
+- `GET /api/v1/trading/alerts` 返回记录 + 出口清单 + 内存计数。
+- `GET /trading/health` 新增 `alerts` 段：`configured`、`channels`、`sent_24h`、`failed_24h`、`dropped`。
+  24h 有失败且零送达 → `alerts.delivery_failed` warning。
+- `POST /api/v1/trading/alerts/test` 主动发一条。
+
+没有最后这条接口时，人配完 webhook 只能等真出事才知道配错了，
+而"通知配错了"恰恰是最该被立刻发现的问题。
+
+### 5. 按天回放（timeline.go）
+
+```
+GET /api/v1/trading/timeline?day=YYYY-MM-DD
+```
+
+把 `trading_cycles` / `trading_plans` / `trading_decisions` / `trading_orders` /
+`trading_events` / `trading_reviews` 六张表按时间摊平成 `[]TimelineEntry`。
+
+- 同一时刻按类别权重排序（循环 → 计划 → 裁决 → 委托 → 成交 → 循环结束 → 事件 → 复盘），
+  保证刷新后看到的是同一条因果链。
+- 摘要含 `model_calls` / `total_tokens`，让"一天思考花了多少钱"可查。
+- 某张表读失败不返回空，而是进 `notes` 并在页面顶部标黄——
+  空白面板会让人误判成"那天什么都没发生"。
+- SQL 用 ±1 秒宽松边界粗筛后在内存精确过滤：`RFC3339Nano` 会省略末尾零，
+  `"00:00:00Z"` 在字符串比较上大于 `"00:00:00.5Z"`，直接比较会把跨零点记录分错天。
+
+### 6. 顺带修掉的两个真问题
+
+**被拒委托数量被置零**（risk.go、store.go）
+
+回放 2026-10-20 时看到 9 条"买入 0 股"。根因是 `block()` 里 `order.Quantity = 0`，
+而且 `order.Quantity = quantity` 原本要等裁决通过后才赋值——
+任何在它之前触发的拦截（资金、单笔风险、行业集中度）带出的都是 0。
+
+修法：数量算出后立即回写订单，`block()` 不再置零。被拒订单本来就不冻结资金，
+下游所有计算只看 `pending` 状态，保留数量不会造成暴露虚高。
+这样"模型想买 100 股、被行业上限拦住"才是一条能用于复盘的记录。
+
+**启动宽限期**（health.go）
+
+`autopilot.no_tick` 在进程刚起来的头 15 秒必然成立（tick 间隔 15 秒），
+每次部署都会收到一条假告警。加 `healthStartupGrace = 90s`：
+告警通道刚建好就发噪音，比不发更伤——假告警多了，真告警就没人看了。
+
+### 7. 交付形态
+
+`scripts/trading-agent.mjs --web` 在守护后端之外托管 `frontend/dist`：
+只读静态文件、SPA 路由回退、`/assets/*` 用 `immutable` 长缓存、`index.html` 用 `no-cache`。
+不做反向代理——前端本来就直接打 `127.0.0.1:20081`，多一层代理多一个排查面。
+
+一条命令：`node scripts/trading-agent.mjs --web` → `http://127.0.0.1:20073/#trading`。
+
+### 8. 测试
+
+新增 `alerting_test.go`（14 项）、`timeline_test.go`（3 项），
+另加 `TestRejectedOrdersKeepIntendedQuantity` 锁定数量不被置零。
+
+覆盖：冷却合并计数、冷却到期补发带 merged/summary、升级突破冷却、
+全失败不占冷却、部分失败保持冷却、文件出口 JSON 行、webhook 企微格式与
+非 2xx 判失败、事件钩子挂载与摘除、队列投递落库、无出口仍落库、
+时间线归并顺序与统计、空白天返回空数组。

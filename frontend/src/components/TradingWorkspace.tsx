@@ -1,7 +1,9 @@
 import {
 	Activity,
 	AlertTriangle,
+	BellRing,
 	Brain,
+	CalendarClock,
 	CheckCircle2,
 	ChevronDown,
 	ChevronUp,
@@ -35,11 +37,14 @@ import {
 	fetchTradingAccount,
 	fetchTradingAutopilot,
 	fetchTradingChannel,
+	fetchTradingAlerts,
 	fetchTradingEvents,
 	fetchTradingHealth,
 	fetchTradingMemory,
 	fetchTradingPerformance,
 	fetchTradingReviews,
+	fetchTradingTimeline,
+	testTradingAlert,
 	fetchTradingUniverse,
 	formatMoney,
 	listTradeCycles,
@@ -61,6 +66,8 @@ import {
 	tradePlanStatusText,
 	tradeRegimeText,
 	type TradeAccountView,
+	type TradeAlertRecord,
+	type TradeAlertsResult,
 	type TradeAutopilotStatus,
 	type TradeBoard,
 	type TradeClosedTrade,
@@ -70,6 +77,8 @@ import {
 	type TradeEvent,
 	type TradeHealth,
 	type TradeLesson,
+	type TradeTimeline,
+	type TradeTimelineEntry,
 	type TradeMarketView,
 	type TradeMemory,
 	type TradeOrder,
@@ -427,6 +436,14 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 	const [health, setHealth] = useState<TradeHealth | null>(null);
 	const [events, setEvents] = useState<TradeEvent[]>([]);
 	const [channel, setChannel] = useState<TradeChannelInfo | null>(null);
+	// 告警投递记录：事件说"发生了什么"，告警说"这件事有没有送到人手上"。
+	// 无人值守时后者才是关键——出事但没通知，和没出事，从外面看是一样的。
+	const [alerts, setAlerts] = useState<TradeAlertsResult | null>(null);
+	const [alertTesting, setAlertTesting] = useState(false);
+	// 时间线回放：按天把循环、计划、裁决、委托、事件摊平成一条线。
+	const [timelineDay, setTimelineDay] = useState(() => new Date().toISOString().slice(0, 10));
+	const [timeline, setTimeline] = useState<TradeTimeline | null>(null);
+	const [timelineLoading, setTimelineLoading] = useState(false);
 	// 情景记忆：每笔平仓当时的市场状态、买入理由与结果。
 	// 与 Lesson 的聚合统计不同，它保留单笔情境，是模型"回忆"的原料。
 	const [memories, setMemories] = useState<TradeMemory[]>([]);
@@ -532,15 +549,18 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 		async (signal?: AbortSignal) => {
 			if (!config) return;
 			try {
-				const [snapshot, log, info] = await Promise.all([
+				const [snapshot, log, info, alertView] = await Promise.all([
 					fetchTradingHealth(config, signal),
 					fetchTradingEvents(config, 30, signal),
 					fetchTradingChannel(config, signal).catch(() => null),
+					// 告警记录单独降级：它依赖一张新表，读失败不该让整个运维面变空。
+					fetchTradingAlerts(config, 40, signal).catch(() => null),
 				]);
 				if (signal?.aborted) return;
 				setHealth(snapshot);
 				setEvents(log);
 				setChannel(info);
+				if (alertView) setAlerts(alertView);
 			} catch {
 				// 运维信息拉取失败不清空上一次结果：一次网络抖动不该让健康条变成"未知"，
 				// 反而掩盖掉真实的状态。
@@ -560,6 +580,44 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 			window.clearInterval(timer);
 		};
 	}, [config, loadOps]);
+
+	// 时间线按需加载：它不是实时面板，只在人想看某一天时才拉。
+	const loadTimeline = useCallback(
+		async (day: string, signal?: AbortSignal) => {
+			if (!config) return;
+			setTimelineLoading(true);
+			try {
+				const view = await fetchTradingTimeline(config, day, signal);
+				if (signal?.aborted) return;
+				setTimeline(view);
+			} catch {
+				// 回放失败保留上一次结果：换成空白面板会让人误以为"那天什么都没发生"。
+			} finally {
+				if (!signal?.aborted) setTimelineLoading(false);
+			}
+		},
+		[config],
+	);
+
+	useEffect(() => {
+		if (!config) return;
+		const controller = new AbortController();
+		void loadTimeline(timelineDay, controller.signal);
+		return () => controller.abort();
+	}, [config, timelineDay, loadTimeline]);
+
+	const handleTestAlert = useCallback(async () => {
+		if (!config) return;
+		setAlertTesting(true);
+		try {
+			const result = await testTradingAlert(config);
+			setMessage(`测试告警已送达：${result.delivered.join('、') || '无出口'}`);
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : '测试告警发送失败');
+		} finally {
+			setAlertTesting(false);
+		}
+	}, [config]);
 
 	const loadReview = useCallback(
 		async (signal?: AbortSignal) => {
@@ -1321,6 +1379,22 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 
 			<CycleLog cycles={cycles} config={config} onOpenPlan={(planId) => void openPlanById(planId)} />
 
+			<TimelinePanel
+				day={timelineDay}
+				timeline={timeline}
+				loading={timelineLoading}
+				onChangeDay={setTimelineDay}
+				onRefresh={() => void loadTimeline(timelineDay)}
+			/>
+
+			<AlertPanel
+				alerts={alerts}
+				health={health}
+				testing={alertTesting}
+				onTest={() => void handleTestAlert()}
+				onRefresh={() => void loadOps()}
+			/>
+
 			<OpsLog events={events} onRefresh={() => void loadOps()} />
 		</section>
 	);
@@ -2013,6 +2087,9 @@ function HealthBar({
 					: '自动循环未启动'}
 				{' · '}挂单 {health.open_orders}
 				{' · '}账本 {health.ledger.ok ? '一致' : `漂移 ¥${formatMoney(health.ledger.drift)}`}
+				{health.alerts?.configured
+					? ` · 告警 ${health.alerts.channels.join('/')}${health.alerts.failed_24h > 0 ? `（24h 失败 ${health.alerts.failed_24h}）` : ''}`
+					: ' · 告警未配置'}
 				{beat.failure_streak > 0 ? ` · 连续失败 ${beat.failure_streak} 轮` : ''}
 				{beat.degraded ? ' · 已降级' : ''}
 			</span>
@@ -2069,6 +2146,224 @@ function OpsLog({ events, onRefresh }: { events: TradeEvent[]; onRefresh: () => 
 			)}
 		</section>
 	);
+}
+
+// TimelinePanel 是某一天的回放。
+//
+// 它存在的理由很具体：系统跑起来之后，"今天为什么没买""这笔单是哪一轮下的"
+// 这类问题会散落在循环、计划、裁决、委托、事件五处，各有各的时间字段。
+// 把它们按时间摊平成一条线，是排障时最先要建立的东西——时间感。
+function TimelinePanel({
+	day,
+	timeline,
+	loading,
+	onChangeDay,
+	onRefresh,
+}: {
+	day: string;
+	timeline: TradeTimeline | null;
+	loading: boolean;
+	onChangeDay: (day: string) => void;
+	onRefresh: () => void;
+}) {
+	const entries = timeline?.entries ?? [];
+	const stats = timeline?.stats;
+	return (
+		<section className="trading-panel">
+			<header>
+				<CalendarClock size={17} />
+				<h2>时间线回放</h2>
+				<span className="trading-subtle">循环 · 计划 · 裁决 · 委托 · 事件，按时间摊平</span>
+				<input
+					type="date"
+					className="trading-date-input"
+					value={day}
+					onChange={(event) => onChangeDay(event.target.value)}
+					aria-label="回放日期"
+				/>
+				<button type="button" className="trading-ghost" onClick={onRefresh} disabled={loading}>
+					{loading ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />} 刷新
+				</button>
+			</header>
+
+			{timeline?.notes && timeline.notes.length > 0 ? (
+				<ul className="trading-timeline-notes">
+					{timeline.notes.map((note) => (
+						<li key={note}>
+							<AlertTriangle size={12} /> {note}
+						</li>
+					))}
+				</ul>
+			) : null}
+
+			{stats ? (
+				<div className="trading-timeline-stats">
+					<span>
+						<b>{stats.cycles}</b> 轮循环{stats.failed_cycles > 0 ? `（失败 ${stats.failed_cycles}）` : ''}
+					</span>
+					<span>
+						<b>{stats.plans}</b> 份计划
+					</span>
+					<span>
+						<b>{stats.decisions}</b> 次裁决
+					</span>
+					<span>
+						<b>{stats.orders}</b> 笔委托 / <b>{stats.filled}</b> 笔成交
+					</span>
+					<span>
+						<b>{stats.blocked}</b> 笔被拦
+					</span>
+					<span>
+						<b>{stats.events}</b> 条事件
+					</span>
+					{stats.model_calls > 0 ? (
+						<span>
+							模型 <b>{stats.model_calls}</b> 次 / <b>{stats.total_tokens.toLocaleString('zh-CN')}</b> tokens
+						</span>
+					) : null}
+				</div>
+			) : null}
+
+			{entries.length === 0 ? (
+				<p className="trading-empty">
+					{loading ? '正在读取当天记录…' : '这一天没有任何记录。可能是非交易日，或当天自动循环没有开启。'}
+				</p>
+			) : (
+				<ol className="trading-timeline">
+					{entries.map((entry, index) => (
+						<li
+							key={`${entry.at}-${entry.category}-${index}`}
+							className={`trading-timeline-item ${entry.severity ?? 'info'}`}
+						>
+							<span className="trading-timeline-time">{new Date(entry.at).toLocaleTimeString('zh-CN', { hour12: false })}</span>
+							<span className={`trading-timeline-tag ${entry.category.replace('.', '-')}`}>
+								{timelineCategoryText(entry.category)}
+							</span>
+							<span className="trading-timeline-body">
+								<strong>
+									{entry.symbol ? `${entry.symbol} ` : ''}
+									{entry.title}
+								</strong>
+								{entry.detail ? <em>{entry.detail}</em> : null}
+							</span>
+							{entry.amount && entry.amount > 0 ? (
+								<span className="trading-timeline-amount">¥{formatMoney(entry.amount)}</span>
+							) : null}
+						</li>
+					))}
+				</ol>
+			)}
+		</section>
+	);
+}
+
+function timelineCategoryText(category: string): string {
+	const labels: Record<string, string> = {
+		'cycle.start': '循环开始',
+		'cycle.end': '循环结束',
+		plan: '计划',
+		decision: '裁决',
+		order: '委托',
+		fill: '成交',
+		event: '事件',
+		review: '复盘',
+	};
+	return labels[category] ?? category;
+}
+
+// AlertPanel 回答一个容易被忽略的问题：出事的时候，通知到底有没有送出去。
+//
+// 展出的不是"应该发什么"，而是"实际发了什么、成没成"。
+// 没有投递结果，人只能靠"我没收到短信"来反推，而这种反推在两个方向上都不可靠。
+function AlertPanel({
+	alerts,
+	health,
+	testing,
+	onTest,
+	onRefresh,
+}: {
+	alerts: TradeAlertsResult | null;
+	health: TradeHealth | null;
+	testing: boolean;
+	onTest: () => void;
+	onRefresh: () => void;
+}) {
+	const records = alerts?.records ?? [];
+	const channels = alerts?.channels ?? health?.alerts?.channels ?? [];
+	const stats = alerts?.stats ?? {};
+	const alertHealth = health?.alerts;
+	return (
+		<section className="trading-panel">
+			<header>
+				<BellRing size={17} />
+				<h2>告警投递</h2>
+				<span className="trading-subtle">熔断、降级、账本漂移、自愈是否真的送到了人手上</span>
+				<button type="button" className="trading-ghost" onClick={onTest} disabled={testing || channels.length === 0}>
+					{testing ? <LoaderCircle size={13} className="spin" /> : <BellRing size={13} />} 发送测试
+				</button>
+				<button type="button" className="trading-ghost" onClick={onRefresh}>
+					<RefreshCw size={13} /> 刷新
+				</button>
+			</header>
+
+			{channels.length === 0 ? (
+				<p className="trading-empty">
+					还没有配置告警出口。出问题时只会记在页面和数据库里，没有人会收到通知——
+					这正是无人值守最容易失效的地方。设置环境变量 <code>A_STOCK_TRADING_ALERT_WEBHOOK</code>（企微/钉钉机器人地址）
+					后重启服务即可，格式见交付手册。
+				</p>
+			) : (
+				<>
+					<div className="trading-alert-summary">
+						<span className="trading-alert-channel">出口：{channels.join('、')}</span>
+						{alertHealth ? (
+							<>
+								<span>24h 送达 <b>{alertHealth.sent_24h}</b></span>
+								<span className={alertHealth.failed_24h > 0 ? 'warn' : ''}>
+									失败 <b>{alertHealth.failed_24h}</b>
+								</span>
+								{alertHealth.dropped > 0 ? <span className="warn">队列丢弃 <b>{alertHealth.dropped}</b></span> : null}
+							</>
+						) : null}
+						{stats.merged ? <span>已合并 <b>{stats.merged}</b></span> : null}
+					</div>
+
+					{records.length === 0 ? (
+						<p className="trading-empty">还没有告警记录。没有记录不代表系统没问题，只代表最近没有触发告警条件。</p>
+					) : (
+						<ul className="trading-alerts">
+							{records.map((record) => (
+								<li key={record.id} className={`${record.severity} ${record.status}`}>
+									<span className="trading-alert-time">{new Date(record.created_at).toLocaleString('zh-CN')}</span>
+									<span className={`trading-alert-status ${record.status}`}>{alertStatusText(record.status)}</span>
+									<span className="trading-alert-message">
+										{record.symbol ? `${record.symbol} ` : ''}
+										{record.message}
+										{record.merged > 0 ? `（合并 ${record.merged} 条同类）` : ''}
+									</span>
+									<span className="trading-alert-kind">
+										{record.channel ? `${record.channel}` : '未外发'}
+										{record.error ? ` · ${record.error}` : ''}
+									</span>
+								</li>
+							))}
+						</ul>
+					)}
+				</>
+			)}
+		</section>
+	);
+}
+
+function alertStatusText(status: TradeAlertRecord['status']): string {
+	switch (status) {
+		case 'sent':
+			return '已送达';
+		case 'failed':
+			return '发送失败';
+		default:
+			return '已合并';
+	}
 }
 
 // uptimeText 把秒数说成人话。长时间运行的秒数（如 18732）对人没有意义。

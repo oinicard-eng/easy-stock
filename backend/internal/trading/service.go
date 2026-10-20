@@ -85,6 +85,10 @@ type Service struct {
 	// 默认开启；单测里显式关闭——那些用例验证的是计划与裁决的语义，
 	// 不该因为多了一次模型往返而失败，也不该用假调研去测真流程。
 	researchEnabled atomic.Bool
+
+	// alerts 是告警投递器。为 nil 表示没有配置任何出口：
+	// 事件照常落库、健康条照常变红，但这些信息不会离开这台机器。
+	alerts *AlertManager
 }
 
 func NewService(store *Store, gateway agent.Gateway, quotes QuoteProvider, catalog StockCatalogProvider, logger *log.Logger) *Service {
@@ -110,6 +114,32 @@ func (s *Service) SetResearchEnabled(enabled bool) {
 }
 
 func (s *Service) Store() *Store { return s.store }
+
+// SetAlerts 注入告警管理器，同时把事件钩子挂到 Store 上。
+//
+// 钩子挂在 Store 而不是 Service，是因为事件写入有多个入口
+// （自愈、作废、回报落账都直接调 store.AppendEvent），
+// 只在一个入口挂钩子会漏掉其余入口，而漏掉的往往正是最该告警的那几条。
+func (s *Service) SetAlerts(manager *AlertManager) {
+	s.mu.Lock()
+	s.alerts = manager
+	s.mu.Unlock()
+	if s.store == nil {
+		return
+	}
+	if manager == nil {
+		s.store.SetEventSink(nil)
+		return
+	}
+	s.store.SetEventSink(manager.Submit)
+}
+
+// Alerts 返回告警管理器，未配置时为 nil。
+func (s *Service) Alerts() *AlertManager {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.alerts
+}
 
 // SetSectorFlow 注入板块资金流数据源。它是可选的：没有它系统照常交易，
 // 只是模型查不到资金流——工具会明确说明"数据源未配置"，不会假装查过了。

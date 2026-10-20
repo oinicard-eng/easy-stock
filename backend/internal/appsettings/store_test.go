@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -25,7 +26,9 @@ func TestStorePersistsSecretsWithPrivatePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat settings: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows 不使用 POSIX 权限位，文件权限恒为 666/755，由父目录 ACL 决定，
+	// 这个断言只在类 Unix 上有意义。落盘与回读的验证在所有平台都保留。
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("settings permissions = %o, want 600", info.Mode().Perm())
 	}
 	reopened, err := Open(path)

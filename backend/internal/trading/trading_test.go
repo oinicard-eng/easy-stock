@@ -261,3 +261,36 @@ func TestPaperBrokerKeepsOrderPendingWhenPriceAboveLimit(t *testing.T) {
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
+
+// 被拦的建议必须保留"原本想买多少"。
+//
+// 这条规则在 2026-10-20 的实盘回放里被发现：时间线上出现 9 条"买入 0 股"，
+// 既无法解读，也无法区分"模型想买 100 股但被行业上限拦住"和
+// "资金真的只够买 0 股"。被拦订单不冻结资金，保留数量不会造成暴露虚高——
+// 所有下游计算都只看 pending 状态。
+func TestRejectedOrdersKeepIntendedQuantity(t *testing.T) {
+	snapshot := testSnapshot([]foundation.Quote{testQuote("600000.SH", "浦发银行", 10, 9.9)})
+	snapshot.Sectors = map[string]string{"600001.SH": "银行", "600000.SH": "银行"}
+	// 已有银行持仓 40%（4 万 / 10 万），本次再买 10% 会突破 45% 的行业上限。
+	snapshot.Positions = []Position{{
+		Symbol: "600001.SH", Name: "某银行", Quantity: 4000, Available: 4000,
+		AverageCost: 10, LastPrice: 10, MarketValue: 40000,
+	}}
+	draft := DraftPlan{Orders: []DraftOrder{{
+		Symbol: "600000.SH", Side: "buy", TargetWeightPercent: 10,
+		OrderType: "limit", LimitPrice: 10, StopLossPrice: 9.5,
+	}}}
+	orders, verdicts := BuildOrders(DefaultAccountID, draft, snapshot, DefaultRiskRules(), time.Now())
+	if len(orders) != 1 || orders[0].Status != OrderStatusRejected {
+		t.Fatalf("行业集中度超限应被拒绝，实际 %+v", orders)
+	}
+	if orders[0].Quantity <= 0 {
+		t.Fatalf("被拒订单应保留原本拟买数量，实际 %d 股；拦截原因：%+v", orders[0].Quantity, verdicts)
+	}
+	if orders[0].ReservedAmount != 0 {
+		t.Fatalf("被拒订单不得冻结资金，实际 %.2f", orders[0].ReservedAmount)
+	}
+	if len(verdicts) == 0 {
+		t.Fatal("应留下拦截原因，否则事后无法判断拦得对不对")
+	}
+}
