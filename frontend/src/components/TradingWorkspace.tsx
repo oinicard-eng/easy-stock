@@ -461,12 +461,12 @@ function SandboxPanel({ config, plan }: { config: BackendConfig; plan: TradePlan
 						<div>
 							<span className="trading-subtle">当时（{profileLabel(result.original.profile)}）</span>
 							<strong>{result.original.accepted} 笔受理 · {result.original.blocked} 笔拦截</strong>
-							<span className="trading-subtle">买入 {formatMoney(result.original.buy_notional)}</span>
+							<span className="trading-subtle">买入 {formatMoney(result.original.buy_notional)} · 仓位 {result.original.exposure_percent.toFixed(1)}%</span>
 						</div>
 						<div>
 							<span className="trading-subtle">回放（{profileLabel(result.replayed.profile)}）</span>
 							<strong>{result.replayed.accepted} 笔受理 · {result.replayed.blocked} 笔拦截</strong>
-							<span className="trading-subtle">买入 {formatMoney(result.replayed.buy_notional)}</span>
+							<span className="trading-subtle">买入 {formatMoney(result.replayed.buy_notional)} · 仓位 {result.replayed.exposure_percent.toFixed(1)}%</span>
 						</div>
 					</div>
 					{result.changes.length > 0 ? (

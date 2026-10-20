@@ -85,6 +85,13 @@ func (s *Service) SandboxPlan(ctx context.Context, planID, profile string) (Sand
 	if profile == "" {
 		profile = plan.TraderProfile
 	}
+	// 不认识的风格必须报错。静默回落到"均衡"会给出一个看起来很确定的错误答案：
+	// 用户以为自己换成了保守，看到的却是均衡的结果，于是得出"换风格没用"。
+	if canonical, ok := canonicalProfile(profile); ok {
+		profile = canonical
+	} else {
+		return SandboxResult{}, fmt.Errorf("未知的交易风格「%s」，可选：steady / balanced / aggressive", profile)
+	}
 	rules := RulesForProfile(profile)
 	result := SandboxResult{
 		PlanID:    plan.ID,
@@ -99,6 +106,9 @@ func (s *Service) SandboxPlan(ctx context.Context, planID, profile string) (Sand
 	if result.Original.Rules.MaxOrders == 0 {
 		result.Original.Rules = RulesForProfile(plan.TraderProfile)
 	}
+	// 仓位必须真的算出来：它是沙盘最直接的结论（"激进会把仓位推到 84%"），
+	// 留 0 会让人以为两边都没买。
+	result.Original.Exposure = sandboxExposure(plan.Snapshot, plan.Orders)
 
 	// 重放：同一份快照、同一份模型建议，只换阈值。
 	// 时间用当时的裁决时间：冷静期、失效条件都以那一刻为准，
@@ -115,6 +125,7 @@ func (s *Service) SandboxPlan(ctx context.Context, planID, profile string) (Sand
 	}
 	replayedOrders, replayedVerdicts := BuildOrders(plan.AccountID, draft, plan.Snapshot, rules, now)
 	result.Replayed = summarizeSandboxSide(profile, rules, replayedOrders, replayedVerdicts)
+	result.Replayed.Exposure = sandboxExposure(plan.Snapshot, replayedOrders)
 
 	result.Changes = diffSandbox(plan.Orders, replayedOrders, replayedVerdicts)
 	if len(result.Changes) == 0 {
@@ -141,17 +152,74 @@ func summarizeSandboxSide(profile string, rules RiskRules, orders []Order, verdi
 	side.Adjusted = policy.Summarize(verdicts).Adjusted
 	for _, order := range orders {
 		switch order.Status {
-		case OrderStatusPending, OrderStatusPartial:
-			side.Accepted++
-			if order.Side == SideBuy {
-				side.BuyNotional += float64(order.Quantity) * order.LimitPrice
-			}
 		case OrderStatusRejected:
 			side.Blocked++
+		case OrderStatusCancelled, OrderStatusExpired:
+			// 撤单/过期既不是"放行后买入"，也不是"被规则拦下"。
+			// 混进任何一边都会让沙盘的两侧口径不一致。
+		default:
+			// pending / partially_filled / filled 都算放行：
+			// 已成交的历史计划如果只认挂在单，会显示"当时一笔没买"，
+			// 而实际账本上已经买进去了——那是最容易误导人的一种错。
+			side.Accepted++
+			if order.Side == SideBuy {
+				quantity := order.Quantity
+				if order.Status == OrderStatusFilled && order.FilledQuantity > 0 {
+					quantity = order.FilledQuantity
+				}
+				side.BuyNotional += float64(quantity) * order.LimitPrice
+			}
 		}
 	}
 	side.BuyNotional = round2(side.BuyNotional)
 	return side
+}
+
+// sandboxExposure 算"这些单全部成交后的总仓位"。
+//
+// 用 equity - cash 取持仓市值，而不是累加 positions：老计划的快照可能只存了
+// 一部分字段，而 equity 与 cash 在每份快照里都必然有值且自洽。
+func sandboxExposure(snapshot Snapshot, orders []Order) float64 {
+	if snapshot.Equity <= 0 {
+		return 0
+	}
+	value := snapshot.Equity - snapshot.Cash
+	if value < 0 {
+		value = 0
+	}
+	for _, order := range orders {
+		if order.Status == OrderStatusRejected || order.Status == OrderStatusCancelled || order.Status == OrderStatusExpired {
+			continue
+		}
+		quantity := order.Quantity
+		if order.Status == OrderStatusFilled && order.FilledQuantity > 0 {
+			quantity = order.FilledQuantity
+		}
+		notional := float64(quantity) * order.LimitPrice
+		if order.Side == SideBuy {
+			value += notional
+		} else {
+			value -= notional
+		}
+	}
+	if value < 0 {
+		value = 0
+	}
+	return round2(value / snapshot.Equity * 100)
+}
+
+// canonicalProfile 把风格名归一到三个合法值。
+func canonicalProfile(profile string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "aggressive", "激进":
+		return "aggressive", true
+	case "steady", "稳健":
+		return "steady", true
+	case "balanced", "均衡":
+		return "balanced", true
+	default:
+		return "", false
+	}
 }
 
 // diffSandbox 逐标的比较两侧的最终状态。
@@ -204,8 +272,8 @@ func diffSandbox(original, replayed []Order, replayedVerdicts []policy.Verdict) 
 		case hadOld && !hasNew:
 			kind = "removed"
 		case hadOld && hasNew:
-			oldActive := oldOrder.Status == OrderStatusPending || oldOrder.Status == OrderStatusPartial
-			newActive := newOrder.Status == OrderStatusPending || newOrder.Status == OrderStatusPartial
+			oldActive := sandboxAllowed(oldOrder)
+			newActive := sandboxAllowed(newOrder)
 			switch {
 			case oldActive && !newActive:
 				kind = "removed"
@@ -241,6 +309,16 @@ func diffSandbox(original, replayed []Order, replayedVerdicts []policy.Verdict) 
 		})
 	}
 	return changes
+}
+
+// sandboxAllowed 判断一笔订单在沙盘口径下算不算"放行"。
+func sandboxAllowed(order Order) bool {
+	switch order.Status {
+	case OrderStatusRejected, OrderStatusCancelled, OrderStatusExpired:
+		return false
+	default:
+		return true
+	}
 }
 
 func describeSandboxOrder(order Order, exists bool) string {

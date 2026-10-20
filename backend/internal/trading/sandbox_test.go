@@ -111,3 +111,67 @@ func TestDiffSandboxExplainsResize(t *testing.T) {
 		t.Fatalf("无裁决时应回落到权重变化说明，实际 %+v", bare)
 	}
 }
+
+// 未知风格必须报错。静默当成"均衡"会给出一个看起来很确定的错误答案：
+// 用户以为选了保守，其实看到的是均衡的结果。
+func TestSandboxRejectsUnknownProfile(t *testing.T) {
+	content := `{"regime":"进攻","summary":"未知风格","orders":[{"symbol":"600000.SH","name":"浦发银行","side":"buy","target_weight_percent":8,"order_type":"limit","limit_price":10.1,"stop_loss_price":9.6,"thesis":"测试","confidence":0.7}]}`
+	service := newTestService(t, content, map[string]foundation.Quote{
+		"600000.SH": testQuote("600000.SH", "浦发银行", 10, 9.9),
+	})
+	ctx := context.Background()
+	plan, err := service.RunPlanSync(ctx, PlanRequest{Watchlist: []string{"600000.SH"}, TraderProfile: "balanced"}, "")
+	if err != nil {
+		t.Fatalf("生成计划失败：%v", err)
+	}
+	if _, err := service.SandboxPlan(ctx, plan.ID, "conservative"); err == nil {
+		t.Fatal("未知风格应报错，实际被静默接受")
+	}
+	// 中文名与大小写要能识别，否则前端换一种写法就报错，同样不可用。
+	for _, profile := range []string{"激进", "稳健", "均衡", "AGGRESSIVE"} {
+		if _, err := service.SandboxPlan(ctx, plan.ID, profile); err != nil {
+			t.Fatalf("风格 %s 应被接受，实际 %v", profile, err)
+		}
+	}
+}
+
+// 仓位必须真的算出来：这是沙盘最直接的结论，留 0 等于没回答。
+func TestSandboxComputesExposure(t *testing.T) {
+	content := `{"regime":"进攻","summary":"仓位口径","orders":[{"symbol":"600000.SH","name":"浦发银行","side":"buy","target_weight_percent":8,"order_type":"limit","limit_price":10.1,"stop_loss_price":9.6,"thesis":"测试","confidence":0.7}]}`
+	service := newTestService(t, content, map[string]foundation.Quote{
+		"600000.SH": testQuote("600000.SH", "浦发银行", 10, 9.9),
+	})
+	ctx := context.Background()
+	plan, err := service.RunPlanSync(ctx, PlanRequest{Watchlist: []string{"600000.SH"}, TraderProfile: "balanced"}, "")
+	if err != nil {
+		t.Fatalf("生成计划失败：%v", err)
+	}
+	result, err := service.SandboxPlan(ctx, plan.ID, "aggressive")
+	if err != nil {
+		t.Fatalf("沙盘回放失败：%v", err)
+	}
+	if result.Replayed.Exposure <= 0 {
+		t.Fatalf("回放侧应算出买入后仓位，实际 %v", result.Replayed.Exposure)
+	}
+	// 空仓起步时，仓位应约等于买入金额/权益，允许四舍五入误差。
+	expected := result.Replayed.BuyNotional / plan.Snapshot.Equity * 100
+	if diff := result.Replayed.Exposure - expected; diff > 0.5 || diff < -0.5 {
+		t.Fatalf("仓位口径不符：算得 %.2f%%，按买入金额应为 %.2f%%", result.Replayed.Exposure, expected)
+	}
+}
+
+// 已成交的历史计划不能显示成"当时一笔没买"。
+func TestSandboxCountsFilledAsAccepted(t *testing.T) {
+	orders := []Order{
+		{Symbol: "600000.SH", Side: SideBuy, Status: OrderStatusFilled, Quantity: 300, FilledQuantity: 300, LimitPrice: 10},
+		{Symbol: "600519.SH", Side: SideBuy, Status: OrderStatusRejected, Quantity: 100, LimitPrice: 1300},
+		{Symbol: "000001.SZ", Side: SideBuy, Status: OrderStatusExpired, Quantity: 500, LimitPrice: 11},
+	}
+	side := summarizeSandboxSide("steady", DefaultRiskRules(), orders, nil)
+	if side.Accepted != 1 || side.Blocked != 1 {
+		t.Fatalf("成交算放行、被拒算拦截、过期两边都不算：%+v", side)
+	}
+	if side.BuyNotional != 3000 {
+		t.Fatalf("买入金额应按成交股数计算，实际 %v", side.BuyNotional)
+	}
+}
