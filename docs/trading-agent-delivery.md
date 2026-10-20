@@ -434,3 +434,43 @@ tick 每 15 秒看一眼异动，命中就立刻发起一轮。三条限制让�
 - 事件通道的权益基线在内存里，重启后前 15 分钟不判断组合级异动。
 - 沙盘用的是**当前代码的规则实现**：如果规则代码本身改了，回放的历史计划
   会按新实现重算，两者差异里混合了"阈值变化"与"实现变化"。
+
+### 8.11 验收清单
+
+按顺序跑，全程约 3 分钟（`providers/eastmoney` 单包超时见文末说明，故排除）。
+
+```bash
+# 1. 后端：交易域 + 接口层 + 策略包
+cd backend && go test ./internal/trading/... ./internal/httpapi/
+
+# 2. 前端：类型 + 单测 + 生产构建
+cd frontend && npx tsc --noEmit && npx vitest run && npx vite build
+
+# 3. 服务健康
+curl -s http://127.0.0.1:20081/api/v1/trading/health
+#    期望：status=healthy、issues=[]、autopilot.running=true、ledger.drift=0
+
+# 4. 沙盘（换风格看差异，纯读）
+curl -s http://127.0.0.1:20081/api/v1/trading/plans | head -c 200   # 取一个 plan_id
+curl -s -X POST http://127.0.0.1:20081/api/v1/trading/plans/<plan_id>/sandbox \
+     -H 'Content-Type: application/json' -d '{"profile":"aggressive"}'
+#    期望：original/replayed 各带一套 rules 与 accepted/blocked 计数，
+#          changes 逐笔列出，notes 在结论一致时说明"差异只在额度余量"
+```
+
+页面上对应的入口：健康条（顶部）、持仓行的「失效条件 / 预期 N 日 / 已自动减仓」、
+计划详情里的「沙盘」按钮与风格切换、组合级冷静期条。
+
+本批代码落点：
+
+| 关注点 | 文件 |
+| --- | --- |
+| 失效条件结构与解析 | `backend/internal/trading/invalidation.go` |
+| 止损冷静期 | `backend/internal/trading/cooldown.go` |
+| ATR 防守线 | `backend/internal/trading/atr.go` |
+| 记忆注入与衰减 | `backend/internal/trading/memory_prompt.go` |
+| 沙盘回放 | `backend/internal/trading/sandbox.go` |
+| 事件通道 | `backend/internal/trading/event_trigger.go` |
+| 撮合滑点/部分成交 | `backend/internal/trading/broker.go` |
+| 守卫判定顺序 | `backend/internal/trading/guard.go` |
+| 下单校正（置信度/冷静期/预期天数） | `backend/internal/trading/risk.go` |
