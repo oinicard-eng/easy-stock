@@ -26,15 +26,15 @@ func TestTimelineMergesSourcesInTimeOrder(t *testing.T) {
 
 	ended := at(9, 35)
 	if err := store.SaveCycle(ctx, Cycle{
-		ID:        "cyc-1",
-		AccountID: DefaultAccountID,
-		Trigger:   CycleTriggerSchedule,
-		Status:    CycleStatusDone,
-		StartedAt: at(9, 30),
-		EndedAt:   &ended,
+		ID:         "cyc-1",
+		AccountID:  DefaultAccountID,
+		Trigger:    CycleTriggerSchedule,
+		Status:     CycleStatusDone,
+		StartedAt:  at(9, 30),
+		EndedAt:    &ended,
 		DurationMS: 300000,
-		Orders:    2,
-		Filled:    1,
+		Orders:     2,
+		Filled:     1,
 	}); err != nil {
 		t.Fatalf("写入循环失败: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestTimelineMergesSourcesInTimeOrder(t *testing.T) {
 		Symbol: "688165.SH", Name: "埃夫特", Side: SideBuy,
 		OrderType: OrderTypeLimit,
 		Quantity:  800, LimitPrice: 14.67,
-		Status: OrderStatusPending,
+		Status:    OrderStatusPending,
 		CreatedAt: at(9, 32), UpdatedAt: at(9, 32),
 	}})
 	if err != nil {

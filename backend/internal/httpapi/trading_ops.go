@@ -263,3 +263,32 @@ func (s *Server) tradingDrawdownRelease(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": state})
 }
+
+// tradingPlanSandbox 用另一套交易风格重新裁决一份历史计划。
+//
+// 它是 POST 而不是 GET，但语义是只读：不产生订单、不冻结资金。
+// 用 POST 只是因为带了一个语义完整的请求体（要回放成哪种风格），
+// 把一个可能很长的 profile 塞进 query 会让日志与分享链接都变得难读。
+func (s *Server) tradingPlanSandbox(w http.ResponseWriter, r *http.Request) {
+	if s.trading == nil {
+		writeError(w, http.StatusServiceUnavailable, "交易服务不可用")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	var body struct {
+		Profile string `json:"profile"`
+	}
+	// 允许空请求体：不指定就按原风格回放，用于验证"同一规则重放是否一致"。
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	result, err := s.trading.SandboxPlan(r.Context(), strings.TrimSpace(r.PathValue("id")), body.Profile)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": result})
+}

@@ -862,6 +862,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/trading/plans/{id}", s.tradingPlanGet)
 	s.mux.HandleFunc("POST /api/v1/trading/plans/{id}/execute", s.tradingPlanExecute)
 	s.mux.HandleFunc("POST /api/v1/trading/plans/{id}/reject", s.tradingPlanReject)
+	s.mux.HandleFunc("POST /api/v1/trading/plans/{id}/sandbox", s.tradingPlanSandbox)
 	s.mux.HandleFunc("POST /api/v1/trading/match", s.tradingMatchPending)
 	s.mux.HandleFunc("POST /api/v1/trading/orders/{id}/cancel", s.tradingOrderCancel)
 	s.mux.HandleFunc("POST /api/v1/reviews/portfolio-expectations", s.portfolioExpectationCreate)

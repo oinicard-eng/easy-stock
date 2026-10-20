@@ -83,14 +83,27 @@ const (
 	CodeRiskStopLossMissing = "risk.stop_loss_missing"
 	CodeRiskStopLossInvalid = "risk.stop_loss_invalid"
 	CodeRiskStopLossWide    = "risk.stop_loss_wide"
-	CodeRiskTradeRisk       = "risk.trade_risk"
-	CodeRiskExposure        = "risk.exposure"
-	CodeRiskCashFloor       = "risk.cash_floor"
+	// CodeRiskStopATR 表示止损距离已按波动率（ATR）校正。
+	// 与 stop_loss_wide 的区别：后者是否决（距离超出账户承受范围），
+	// 前者是调整（距离与这只票的正常波动不匹配，但仍在承受范围内）。
+	CodeRiskStopATR   = "risk.stop_atr"
+	CodeRiskTradeRisk = "risk.trade_risk"
+	CodeRiskExposure  = "risk.exposure"
+	CodeRiskCashFloor = "risk.cash_floor"
+	// 冷静期：止损之后不该马上回到同一个坑里。
+	// 与"单票上限"分开成码，因为这两种拦截的含义完全不同：
+	// 一个是"仓位满了"，一个是"你刚在这里亏过"。
+	CodeRiskCooldownSymbol = "risk.cooldown_symbol"
+	CodeRiskCooldownSector = "risk.cooldown_sector"
 
 	CodeSizingBelowLot       = "sizing.below_lot"
 	CodeSizingReducedByCash  = "sizing.reduced_by_cash"
 	CodeSizingScaled         = "sizing.scaled"
 	CodeSizingDroppedOnScale = "sizing.dropped_on_scale"
+	// CodeSizingConfidence 表示目标权重已按置信度打折。
+	// 单独成码而不是并进 sizing.scaled：后者是组合总额度不够，
+	// 前者是"模型自己也没把握"——复盘时这两件事的处置方向完全相反。
+	CodeSizingConfidence = "sizing.confidence"
 
 	CodePositionNotHeld     = "position.not_held"
 	CodePositionUnavailable = "position.unavailable"
@@ -110,6 +123,11 @@ const (
 	// CodeGuardNoSellable 表示防守线已触发但可卖股数为 0（T+1 或已在途卖单）。
 	// 必须显式记录：不写的话，"止损没执行"会看起来像"系统没发现"。
 	CodeGuardNoSellable = "guard.no_sellable"
+	// CodeGuardInvalidation 表示买入时写下的失效条件成立，触发减仓。
+	// 与 guard.stop_loss 的区别在力度与含义：失效是"论点弱了"，止损是"价格到线了"。
+	CodeGuardInvalidation = "guard.invalidation"
+	// CodeGuardTimeStop 表示超出预期兑现期限仍未盈利。
+	CodeGuardTimeStop = "guard.time_stop"
 )
 
 // Verdict 是一条裁决记录。Metric 与 Limit 是这条裁决所依据的数字，

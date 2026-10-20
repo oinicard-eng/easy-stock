@@ -223,7 +223,14 @@ func TestServiceGeneratesAndExecutesPaperPlan(t *testing.T) {
 	if positions[0].Available != 0 {
 		t.Fatalf("T+1 当日买入不可卖，实际可卖 %d", positions[0].Available)
 	}
-	expectedCash := 100000 - 900*10 - executed.Orders[0].Fee
+	// 成交价带滑点：买单按现价上滑，并被限价 10.20 封住。
+	// 断言"在限价内、不高于现价 + 滑点"而不是断言一个精确数字，
+	// 否则调整滑点参数时这条用例会变成纯粹的维护负担。
+	fillPrice := executed.Orders[0].FilledPrice
+	if fillPrice < 10 || fillPrice > 10.01 {
+		t.Fatalf("成交价应在现价与滑点之间，实际 %.4f", fillPrice)
+	}
+	expectedCash := 100000 - 900*fillPrice - executed.Orders[0].Fee
 	if diff := account.Cash - expectedCash; diff > 0.01 || diff < -0.01 {
 		t.Fatalf("现金应为 %.2f，实际 %.2f", expectedCash, account.Cash)
 	}

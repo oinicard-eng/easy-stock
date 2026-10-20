@@ -24,6 +24,29 @@ export function availableCash(account: TradeAccount): number {
 	return Math.round((account.cash - (account.reserved_cash || 0)) * 100) / 100;
 }
 
+/** 失效条件的可执行形态。字段为空表示模型只写了文字，没有可判定条件。 */
+export type TradeInvalidationSpec = {
+	price_below?: number;
+	price_above?: number;
+	sector_flow?: string;
+	deadline_days?: number;
+	note?: string;
+};
+
+/** 止损后的禁买约束：标的级 4 小时、行业级当日。 */
+export type TradeCooldown = {
+	symbol?: string;
+	sector?: string;
+	until: string;
+	reason: string;
+	trigger?: string;
+};
+
+export type TradeCooldownView = {
+	symbols?: Record<string, TradeCooldown>;
+	sectors?: Record<string, TradeCooldown>;
+};
+
 export type TradePosition = {
 	account_id: string;
 	symbol: string;
@@ -46,6 +69,16 @@ export type TradePosition = {
 	sector?: string;
 	opened_at?: string;
 	last_buy_date?: string;
+	/** 买入理由原文：持仓上留一份，计划过期后仍能回答「当初为什么买」 */
+	thesis?: string;
+	/** 失效条件原文 */
+	invalidation?: string;
+	/** 失效条件的可执行形态，守卫据此判定 */
+	invalidation_rule?: TradeInvalidationSpec;
+	/** 预期兑现天数（交易日），时间止损的阈值来源 */
+	expected_days?: number;
+	/** 失效条件已触发过一次自动减仓的时刻 */
+	auto_reduce_at?: string;
 };
 
 export type TradeOrder = {
@@ -82,6 +115,8 @@ export type TradeOrder = {
 	reject_reason?: string;
 	thesis?: string;
 	invalidation?: string;
+	invalidation_rule?: TradeInvalidationSpec;
+	expected_days?: number;
 	confidence?: number;
 	created_at: string;
 	updated_at: string;
@@ -343,6 +378,8 @@ export type TradePlan = {
 		board?: TradeBoard;
 		/** 候选池由系统自动生成，而非人工指定 */
 		auto_universe?: boolean;
+		/** 本次计划时生效的止损冷静期约束 */
+		cooldowns?: TradeCooldownView;
 	};
 	rules: {
 		max_orders: number;
@@ -457,6 +494,53 @@ export async function fetchTradeDecisionByPlan(
 	} catch {
 		return null;
 	}
+}
+
+/** 沙盘回放：同一份输入、只换风控阈值，逐笔列出差异。纯读，不改真实订单。 */
+export type TradeSandboxSide = {
+	profile: string;
+	rules: TradePlan['rules'];
+	accepted: number;
+	blocked: number;
+	adjusted: number;
+	buy_notional: number;
+	exposure_percent: number;
+};
+
+export type TradeSandboxChange = {
+	symbol: string;
+	name?: string;
+	/** added 新规则放行 / removed 新规则拒绝 / resized 股数变化 */
+	kind: 'added' | 'removed' | 'resized' | 'blocked' | 'kept';
+	original: string;
+	replayed: string;
+	reason?: string;
+};
+
+export type TradeSandboxResult = {
+	plan_id: string;
+	planned_at: string;
+	original: TradeSandboxSide;
+	replayed: TradeSandboxSide;
+	changes: TradeSandboxChange[];
+	notes: string[];
+};
+
+export async function sandboxTradePlan(
+	config: BackendConfig,
+	id: string,
+	profile: string,
+): Promise<TradeSandboxResult> {
+	const payload = await requestJSON<{ data: TradeSandboxResult }>(
+		config,
+		`/api/v1/trading/plans/${encodeURIComponent(id)}/sandbox`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ profile }),
+		},
+	);
+	return payload.data;
 }
 
 export async function executeTradePlan(config: BackendConfig, id: string): Promise<TradePlan> {

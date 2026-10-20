@@ -58,6 +58,9 @@ type Autopilot struct {
 	lastTickAt    time.Time
 	lastSuccessAt time.Time
 	lastReconcile time.Time
+	// watch 是事件通道的状态：触发记录、间隔、权益基线。
+	// 全部放在内存里：重启后重新建立基线，比拿昨天的权益当基线安全得多。
+	watch eventWatch
 	// failureStreak 是连续失败轮数。成功一轮即清零：
 	// 中间成功过一次，说明通道是通的，不该继续按"连续故障"处理。
 	failureStreak int
@@ -206,6 +209,27 @@ func (a *Autopilot) tick() {
 		return
 	}
 	if !a.due(now) {
+		// 定时轮次还没到，但行情可能已经先到了。
+		// 事件通道只处理"今天还没见过的、足够大的"异动，具体门槛见 event_trigger.go。
+		if reason, fired := a.eventTriggered(ctx, accountID, now); fired {
+			a.logf("event=autopilot_event_cycle reason=%s", reason)
+			_ = a.store.AppendEvent(ctx, Event{
+				AccountID: accountID,
+				Severity:  EventSeverityWarning,
+				Kind:      EventCycleEventTriggered,
+				Message:   reason,
+				CreatedAt: now.UTC(),
+			})
+			// 与定时轮次一样先推进下一次时间：事件触发失败不能原地重试，
+			// 否则一次行情中断会变成每 15 秒一次的模型调用。
+			a.setNext(now.Add(time.Duration(config.IntervalSeconds) * time.Second))
+			if _, err := a.RunCycle(ctx, CycleTriggerEvent); err != nil {
+				a.logf("event=autopilot_event_cycle_failed err=%v", err)
+				a.recordFailure(ctx, accountID, err)
+			} else {
+				a.recordSuccess(ctx, accountID)
+			}
+		}
 		return
 	}
 	// 先推进下一次时间再执行：一轮失败时不能原地重试，
@@ -589,6 +613,15 @@ func (a *Autopilot) RunCycle(ctx context.Context, trigger CycleTrigger) (Cycle, 
 				cycle.Matched++
 			}
 		}
+	}
+
+	// 8.4 波动率追踪：价格创新高后把止损跟上去。
+	// 放在防守线之前：上移后的止损要么在本次检查里直接触发离场，
+	// 要么成为新的底线；放在之后则会晚一轮生效，而这一轮里回撤已经发生了。
+	if raised, trailErr := a.service.TrailStopsByATR(ctx, accountID); trailErr != nil {
+		cycle.Notes = append(cycle.Notes, fmt.Sprintf("止损跟踪失败：%v", trailErr))
+	} else if raised > 0 {
+		cycle.Notes = append(cycle.Notes, fmt.Sprintf("按波动率上移止损 %d 笔", raised))
 	}
 
 	// 8.5 持仓防守线。它排在这里的理由：

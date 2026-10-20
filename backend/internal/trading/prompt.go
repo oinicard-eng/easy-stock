@@ -11,6 +11,7 @@ import (
 )
 
 const maxPromptQuotes = 40
+
 // maxPromptCandidates 限制候选依据的行数，避免提示词过长挤占模型注意力。
 const maxPromptCandidates = 30
 
@@ -42,6 +43,14 @@ type PlanPromptInput struct {
 	// 这是本提示词里唯一"关于模型自己历史行为"的事实，也是打破
 	// "每轮重复同一个错误"的唯一手段。
 	Blocks []BlockedIntent
+	// Cooldowns 是止损后仍在生效的禁买约束。
+	// 必须提前告诉模型：让它自己避开，比每轮给出建议再被守卫拦掉要好——
+	// 后者会让界面看起来像"模型很积极、系统总在否决"。
+	Cooldowns CooldownView
+	// Memories 是自动挑出的相关记忆（同标的/同行业/同市场状态）。
+	// 与 Experience 的分工：Experience 是聚合统计（"止损胜率 25%"），
+	// Memories 是单笔情境（"那天为什么买、后来发生了什么"）。
+	Memories []MemoryBrief
 }
 
 // BlockedIntent 是一条被拦下的建议。它保留模型的原始意图（想买多少、什么价位），
@@ -82,7 +91,7 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	fmt.Fprintf(&builder, "1. 只能从下方「行情快照」列出的标的中选择，禁止出现其他代码或名称。\n")
 	fmt.Fprintf(&builder, "2. 禁止编造价格。限价必须落在快照给出的涨停价与跌停价之间。\n")
 	fmt.Fprintf(&builder, "3. 不要输出股数、金额或费用，只输出目标权重百分比；股数由系统换算。\n")
-	fmt.Fprintf(&builder, "4. 每笔买入必须给出止损价，且止损价低于买入价，止损距离不超过 %.1f%%。\n", rules.MaxStopLossPercent)
+	fmt.Fprintf(&builder, "4. 每笔买入必须给出止损价（低于买入价、距离不超过 %.1f%%）与 invalidation 失效条件，两者一起构成退出承诺。\n", rules.MaxStopLossPercent)
 	fmt.Fprintf(&builder, "5. 单票目标权重不超过 %.1f%%，单次最多 %d 笔建议。\n", rules.MaxSingleWeightPercent, rules.MaxOrders)
 	fmt.Fprintf(&builder, "6. 买入后现金占比不得低于 %.1f%%，总仓位不得高于 %.1f%%。\n", rules.MinCashPercent, exposureLimit)
 	fmt.Fprintf(&builder, "7. 同一标的只能出现一次；卖出只能针对已有持仓，且不超过可卖数量。\n")
@@ -130,6 +139,21 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 			if position.Sector != "" {
 				fmt.Fprintf(&builder, "，行业 %s", position.Sector)
 			}
+			// 失效条件与预期期限必须写回提示词。模型上一轮写下的条件
+			// 若不在这一轮出现，它就无法判断"我当时的逻辑现在还成立吗"，
+			// 只能凭当前价格重新编一个理由。
+			if thesis := strings.TrimSpace(position.Thesis); thesis != "" {
+				fmt.Fprintf(&builder, "，买入理由「%s」", clipRunes(thesis, 60))
+			}
+			if condition := describeInvalidation(position.InvalidationRule, position.Invalidation); condition != "" {
+				fmt.Fprintf(&builder, "，失效条件 %s", clipRunes(condition, 60))
+			}
+			if position.ExpectedDays > 0 {
+				fmt.Fprintf(&builder, "，预期 %d 个交易日内兑现", position.ExpectedDays)
+			}
+			if days := holdingDays(position.OpenedAt, input.Now); days > 0 {
+				fmt.Fprintf(&builder, "，已持有 %d 天", days)
+			}
 			builder.WriteString("\n")
 		}
 		builder.WriteString("  说明：止损价由持仓防守线自动执行，不需要你在 orders 里重复卖出这些标的。\n")
@@ -151,6 +175,16 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 		builder.WriteString("  说明：这些标的已有挂单，本轮不要为它们提交同方向的新建议；要改主意请等成交，或先撤单再重新计划。\n")
 	}
 
+	// 冷静期必须在模型做判断之前告知。放在"被拦下的建议"那一节之后讲太晚：
+	// 那时模型已经想好了要买什么，看到的只是"又被拒了"。
+	if lines := input.Cooldowns.Describe(input.Now); len(lines) > 0 {
+		builder.WriteString("- 当前禁买（止损后的冷静期，硬约束）：\n")
+		for _, line := range lines {
+			fmt.Fprintf(&builder, "  - %s\n", line)
+		}
+		builder.WriteString("  说明：这些标的与行业在本轮不可买入，提了也会被拦。这段时间可以用来观察，而不是用来翻本。\n")
+	}
+
 	if input.Market.Evaluated {
 		builder.WriteString("\n## 三、市场环境（确定性统计，不是模型观点）\n")
 		for _, note := range input.Market.Notes {
@@ -170,6 +204,16 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	// 明确边界：经验是事实描述，不是对本轮的建议。不写这句，模型会把
 	// "上次止损的都亏了" 理解成 "这次不要止损"。
 	builder.WriteString("经验只说明过去发生过什么，不构成对本轮的指令。每一笔仍要独立判断，止损纪律不因历史统计而放宽。\n")
+
+	// 单笔情境与聚合统计并列给出：聚合回答"平均而言"，情境回答"那一次到底发生了什么"。
+	// 只给聚合时，模型最省力的解读是"止损胜率低 → 少止损"，这是灾难性的。
+	if lines := memoryPromptLines(input.Memories); len(lines) > 0 {
+		builder.WriteString("\n### 相关记忆（系统按标的/行业/市场状态挑出的已平仓记录）\n")
+		for _, line := range lines {
+			fmt.Fprintf(&builder, "- %s\n", line)
+		}
+		builder.WriteString("记忆是单笔事实，不能直接推广成本轮结论：同样的环境里，第二次的结果可能完全相反。\n")
+	}
 
 	// 这一段是"闭环"的关键：把模型自己的历史意图与系统的否决意见送回输入端。
 	// 只写"被拦了"不够，必须同时给出原始意图与拦截代码，模型才知道该改什么：
@@ -293,8 +337,14 @@ func BuildPlanPrompt(input PlanPromptInput) string {
       "limit_price": 10.23,
       "stop_loss_price": 9.80,
       "take_profit_price": 11.50,
+      "expected_days": 5,
       "thesis": "不超过 60 字，写明事实依据与确认条件",
-      "invalidation": "不超过 40 字，写明什么情况说明判断失效",
+      "invalidation": {
+        "price_below": 9.85,
+        "deadline_days": 5,
+        "sector_flow": "所属板块主力资金转为连续净流出",
+        "note": "不超过 40 字，写清为什么这些条件成立就说明判断错了"
+      },
       "confidence": 0.62
     }
   ]
@@ -302,6 +352,15 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 `)
 	builder.WriteString("\n卖出示例：side 为 sell，使用 \"sell_fraction_percent\": 50 表示卖出可卖数量的一半；此字段与 target_weight_percent 互斥。\n")
 	builder.WriteString("confidence 取 0 到 1 之间的小数。orders 可以为空数组。\n")
+	// 这一段必须讲清"哪些条件真的会被执行"，否则模型会以为整段话都只是写给人看的，
+	// 于是随手填一个永远不成立的数字——那样的失效条件等于没有。
+	builder.WriteString("\ninvalidation 的字段会被系统按下面的方式执行，请按此设计：\n")
+	builder.WriteString("- price_below：现价跌破该价即视为判断失效，系统自动卖出该仓位一半（不清仓，剩下的交止损）。\n")
+	builder.WriteString("- deadline_days：持有超过该交易日数仍未盈利，系统自动减仓一半；若届时为亏损则清仓。\n")
+	builder.WriteString("- sector_flow：只作为文字记录，系统无法自动判定板块资金，请勿把它当作唯一失效条件。\n")
+	builder.WriteString("- note：写给人看，系统不解析。\n")
+	builder.WriteString("失效条件与止损的分工：止损是「价格到线」，失效是「逻辑不成立」。不要用失效条件替代止损，也不要写成同一个价位。\n")
+	builder.WriteString("expected_days 是预期兑现天数（交易日），用于时间止损；不给则按计划周期推断。\n")
 	return builder.String()
 }
 

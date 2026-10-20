@@ -114,7 +114,8 @@ func BuildProtectiveOrders(snapshot Snapshot, rules RiskRules, config GuardConfi
 			// 用 0 代替则会让每只票都"跌破止损"——两种都是编造事实。
 			continue
 		}
-		trigger, fraction, verdict := evaluatePosition(position, price, rules, config)
+		heldDays := holdingDays(position.OpenedAt, now)
+		trigger, fraction, verdict := evaluatePosition(position, price, heldDays, rules, config)
 		if trigger == TriggerNoTrigger {
 			continue
 		}
@@ -164,7 +165,12 @@ func BuildProtectiveOrders(snapshot Snapshot, rules RiskRules, config GuardConfi
 }
 
 // evaluatePosition 判断单个持仓该不该离场，返回触发原因与卖出比例（占可卖股数，0–100）。
-func evaluatePosition(position Position, price float64, rules RiskRules, config GuardConfig) (string, float64, policy.Verdict) {
+//
+// 判断顺序即优先级，不可交换：止损（承诺）→ 硬止损（兜底）→ 失效条件（论点弱）
+// → 止盈（计划内兑现）→ 移动止损（保住利润）→ 时间止损（期限到了）。
+// 前两条是清仓，中间两条是减仓，最后两条按情形定力度——力度差异写在这里，
+// 因为"止损"和"失效"如果都用清仓执行，模型写下的失效条件就变成了第二个止损。
+func evaluatePosition(position Position, price float64, heldDays int, rules RiskRules, config GuardConfig) (string, float64, policy.Verdict) {
 	profit := 0.0
 	if position.AverageCost > 0 {
 		profit = (price/position.AverageCost - 1) * 100
@@ -191,7 +197,21 @@ func evaluatePosition(position Position, price float64, rules RiskRules, config 
 		}
 	}
 
-	// 3. 分级止盈：先兑现一部分，剩余交给移动止损。
+	// 3. 失效条件：买入时写下的"什么情况下这笔判断不成立"。
+	// 只减仓不清仓——这是它与止损的根本区别；同一持仓只自动执行一次，
+	// 否则一次误判会在连续几轮里把仓位砍到零。
+	if position.InvalidationRule != nil && position.AutoReduceAt == nil {
+		if hit, reason := position.InvalidationRule.Triggered(price, heldDays); hit {
+			return TriggerInvalidation, invalidationReducePercent, policy.Verdict{
+				Code: policy.CodeGuardInvalidation, Level: policy.LevelAdjust, Scope: policy.ScopePosition,
+				Symbol: position.Symbol, Metric: round2(profit),
+				Message: fmt.Sprintf("%s 失效条件成立：%s（浮盈 %+.2f%%），减仓 %d%% 而非清仓",
+					position.Symbol, reason, profit, invalidationReducePercent),
+			}
+		}
+	}
+
+	// 4. 分级止盈：先兑现一部分，剩余交给移动止损。
 	if position.TakeProfitPrice > 0 && price >= position.TakeProfitPrice {
 		level := position.ReduceCount
 		if level < len(config.TakeProfitLadder) {
@@ -208,7 +228,7 @@ func evaluatePosition(position Position, price float64, rules RiskRules, config 
 		}
 	}
 
-	// 4. 移动止损：已经在盈利，但从最高点回撤了足够多。
+	// 5. 移动止损：已经在盈利，但从最高点回撤了足够多。
 	if position.PeakPrice > 0 && profit >= config.TrailArmPercent {
 		drawdown := (price/position.PeakPrice - 1) * 100
 		if drawdown <= -config.TrailPercent {
@@ -220,8 +240,41 @@ func evaluatePosition(position Position, price float64, rules RiskRules, config 
 			}
 		}
 	}
+
+	// 6. 时间止损：超过预期兑现期限，价格既没跌到止损、也没涨到止盈。
+	// 这是"钱被占着不干活"的唯一解——不设它，一个横盘三个月的仓位会永远占着额度。
+	if position.ExpectedDays > 0 && position.AutoReduceAt == nil {
+		if limit := deadlineNaturalDays(position.ExpectedDays); limit > 0 && heldDays > limit {
+			switch {
+			case profit < 0:
+				return TriggerTimeStop, 100, policy.Verdict{
+					Code: policy.CodeGuardTimeStop, Level: policy.LevelBlock, Scope: policy.ScopePosition,
+					Symbol: position.Symbol, Metric: round2(profit),
+					Message: fmt.Sprintf("%s 持有 %d 天超过预期 %d 个交易日且浮亏 %+.2f%%，时间止损离场",
+						position.Symbol, heldDays, position.ExpectedDays, profit),
+				}
+			case profit < timeStopMinProfitPercent:
+				return TriggerTimeStop, 50, policy.Verdict{
+					Code: policy.CodeGuardTimeStop, Level: policy.LevelAdjust, Scope: policy.ScopePosition,
+					Symbol: position.Symbol, Metric: round2(profit),
+					Message: fmt.Sprintf("%s 持有 %d 天超过预期 %d 个交易日，浮盈仅 %+.2f%%，减仓 50%% 释放额度",
+						position.Symbol, heldDays, position.ExpectedDays, profit),
+				}
+			}
+		}
+	}
 	return TriggerNoTrigger, 0, policy.Verdict{}
 }
+
+const (
+	// invalidationReducePercent 是失效条件触发时的减仓比例。
+	// 取 50% 而不是 100%：失效条件写错的概率远高于止损线写错，
+	// 一次误判只该减半，剩下的交给人或止损。
+	invalidationReducePercent = 50
+	// timeStopMinProfitPercent 是"超期但还算及格"的浮盈线。
+	// 低于它说明判断既没错到该止损、也没对到值得继续占额度。
+	timeStopMinProfitPercent = 2.0
+)
 
 // TakeProfitTrigger 返回第 level 级（从 0 开始）止盈的触发标识。
 // 分级用同一个 Trigger 前缀 + 级别，复盘按前缀聚合，按级别看细节。
@@ -254,6 +307,10 @@ func triggerLabel(trigger string) string {
 		return "硬止损"
 	case trigger == TriggerTrailStop:
 		return "移动止损"
+	case trigger == TriggerInvalidation:
+		return "失效条件"
+	case trigger == TriggerTimeStop:
+		return "时间止损"
 	case strings.HasPrefix(trigger, TriggerTakeProfit):
 		return "止盈"
 	default:

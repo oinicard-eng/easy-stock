@@ -142,6 +142,13 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"trading_positions", "reduce_count", "INTEGER NOT NULL DEFAULT 0"},
 		{"trading_positions", "sector", "TEXT NOT NULL DEFAULT ''"},
 		{"trading_positions", "opened_at", "TEXT NOT NULL DEFAULT ''"},
+		// 论点与失效条件跟着持仓走：计划会过期，持仓还在，
+		// "当初为什么买它"这个问题不能靠翻三个月前的计划来回答。
+		{"trading_positions", "thesis", "TEXT NOT NULL DEFAULT ''"},
+		{"trading_positions", "invalidation", "TEXT NOT NULL DEFAULT ''"},
+		{"trading_positions", "invalidation_rule", "TEXT NOT NULL DEFAULT ''"},
+		{"trading_positions", "expected_days", "INTEGER NOT NULL DEFAULT 0"},
+		{"trading_positions", "auto_reduce_at", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.define); err != nil {
 			return err
@@ -328,21 +335,37 @@ func (s *Store) ResetAccount(ctx context.Context, id string, initialCash float64
 // positionColumns 是持仓表读取的唯一字段清单。三处读取（列表、单条、事务内）
 // 必须共用它：各写一份的结果是新增一列时漏改一处，那处读出来的持仓就永远没有防守线。
 const positionColumns = `account_id,symbol,name,quantity,available_quantity,average_cost,last_price,
-	reserved_quantity,stop_loss_price,take_profit_price,peak_price,reduce_count,sector,opened_at,last_buy_date,updated_at`
+	reserved_quantity,stop_loss_price,take_profit_price,peak_price,reduce_count,sector,opened_at,last_buy_date,
+	thesis,invalidation,invalidation_rule,expected_days,auto_reduce_at,updated_at`
 
 // scanPosition 按 positionColumns 的顺序读一行。opened_at 为空串表示建仓时间未知
 // （旧数据），此时返回 nil 而不是零值时间——零值时间会被算成"持有 2000 天"。
 func scanPosition(scanner interface{ Scan(...any) error }, position *Position) error {
-	var updated, lastBuyDB, openedDB string
+	var updated, lastBuyDB, openedDB, ruleDB, autoReduceDB string
 	if err := scanner.Scan(&position.AccountID, &position.Symbol, &position.Name, &position.Quantity,
 		&position.Available, &position.AverageCost, &position.LastPrice,
 		&position.ReservedQuantity, &position.StopLossPrice, &position.TakeProfitPrice,
 		&position.PeakPrice, &position.ReduceCount, &position.Sector, &openedDB,
-		&lastBuyDB, &updated); err != nil {
+		&lastBuyDB, &position.Thesis, &position.Invalidation, &ruleDB, &position.ExpectedDays,
+		&autoReduceDB, &updated); err != nil {
 		return err
 	}
 	position.LastBuyDate = lastBuyDB
 	position.UpdatedAt = parseTime(updated)
+	// 解析失败按"没有可执行条件"处理：一条读不出来的条件如果被当成
+	// "条件已成立"，会在下一轮立刻触发一次减仓。
+	if strings.TrimSpace(ruleDB) != "" {
+		var rule InvalidationSpec
+		if err := json.Unmarshal([]byte(ruleDB), &rule); err == nil && !rule.Empty() {
+			position.InvalidationRule = &rule
+		}
+	}
+	if strings.TrimSpace(autoReduceDB) != "" {
+		at := parseTime(autoReduceDB)
+		if !at.IsZero() {
+			position.AutoReduceAt = &at
+		}
+	}
 	if strings.TrimSpace(openedDB) != "" {
 		opened := parseTime(openedDB)
 		if !opened.IsZero() {
@@ -723,6 +746,16 @@ func (s *Store) ApplyFill(ctx context.Context, order Order, quantity int, price,
 				return Order{}, err
 			}
 		}
+		// 失效条件与时间止损的减仓要记下"已经自动减过一次"。
+		// 不记的话下一轮同一个条件仍然成立，会在几轮之内把仓位砍到零；
+		// 记录之后，剩余仓位交回给人或止损，而不是由一句可能写错的话决定。
+		if order.Trigger == TriggerInvalidation || order.Trigger == TriggerTimeStop {
+			if _, err := tx.ExecContext(ctx, `UPDATE trading_positions
+				SET auto_reduce_at=?, updated_at=?
+				WHERE account_id=? AND symbol=?`, nowText(now), nowText(now), order.AccountID, order.Symbol); err != nil {
+				return Order{}, err
+			}
+		}
 	default:
 		return Order{}, errors.New("未知买卖方向")
 	}
@@ -776,12 +809,15 @@ func (s *Store) applyBuy(ctx context.Context, tx *sql.Tx, order Order, position 
 	// 旧单没有给出则保留原值——被空值覆盖等于把保护悄悄取消。
 	stop := order.StopLossPrice
 	takeProfit := order.TakeProfitPrice
+	ruleJSON := marshalRule(order.InvalidationRule)
 	if !exists {
 		_, err = tx.ExecContext(ctx, `INSERT INTO trading_positions(account_id,symbol,name,quantity,available_quantity,average_cost,last_price,
-			reserved_quantity,stop_loss_price,take_profit_price,peak_price,reduce_count,sector,opened_at,last_buy_date,updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			reserved_quantity,stop_loss_price,take_profit_price,peak_price,reduce_count,sector,opened_at,last_buy_date,
+			thesis,invalidation,invalidation_rule,expected_days,auto_reduce_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			order.AccountID, order.Symbol, order.Name, quantity, 0, price, price,
-			0, round2(stop), round2(takeProfit), price, 0, order.Sector, nowText(now), today, nowText(now))
+			0, round2(stop), round2(takeProfit), price, 0, order.Sector, nowText(now), today,
+			order.Thesis, order.Invalidation, ruleJSON, order.ExpectedDays, "", nowText(now))
 		return err
 	}
 	newQuantity := position.Quantity + quantity
@@ -793,16 +829,42 @@ func (s *Store) applyBuy(ctx context.Context, tx *sql.Tx, order Order, position 
 	if takeProfit <= 0 {
 		takeProfit = position.TakeProfitPrice
 	}
+	// 加仓时以新单的论点与失效条件为准（模型刚重新判断过），
+	// 新单没写则保留原值——被空值覆盖等于把保护悄悄取消。
+	thesis := firstNonEmpty(order.Thesis, position.Thesis)
+	invalidation := firstNonEmpty(order.Invalidation, position.Invalidation)
+	if ruleJSON == "" {
+		ruleJSON = marshalRule(position.InvalidationRule)
+	}
+	expectedDays := order.ExpectedDays
+	if expectedDays <= 0 {
+		expectedDays = position.ExpectedDays
+	}
 	peak := position.PeakPrice
 	if price > peak {
 		peak = price
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE trading_positions SET quantity=?,average_cost=?,last_price=?,last_buy_date=?,
-		stop_loss_price=?,take_profit_price=?,peak_price=?,sector=?,updated_at=?
+		stop_loss_price=?,take_profit_price=?,peak_price=?,sector=?,thesis=?,invalidation=?,invalidation_rule=?,
+		expected_days=?,updated_at=?
 		WHERE account_id=? AND symbol=?`,
 		newQuantity, newCost, price, today, round2(stop), round2(takeProfit), round2(peak),
-		firstNonEmpty(order.Sector, position.Sector), nowText(now), order.AccountID, order.Symbol)
+		firstNonEmpty(order.Sector, position.Sector), thesis, invalidation, ruleJSON, expectedDays,
+		nowText(now), order.AccountID, order.Symbol)
 	return err
+}
+
+// marshalRule 把失效条件序列化成落库文本。空条件写空串而不是 "{}"：
+// 空对象会让"有没有条件"这件事依赖 JSON 解析结果，而不是一个可以直接看的值。
+func marshalRule(rule *InvalidationSpec) string {
+	if rule == nil || rule.Empty() {
+		return ""
+	}
+	payload, err := json.Marshal(rule)
+	if err != nil {
+		return ""
+	}
+	return string(payload)
 }
 
 // insertClosedTradeTx 写入一条已实现平仓记录。

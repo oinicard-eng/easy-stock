@@ -9,6 +9,7 @@ import {
 	ChevronUp,
 	Compass,
 	Gauge,
+	GitCompareArrows,
 	History,
 	LoaderCircle,
 	Play,
@@ -55,6 +56,7 @@ import {
 	rejectTradePlan,
 	releaseTradingDrawdown,
 	resetTradingBreaker,
+	sandboxTradePlan,
 	resetTradingAccount,
 	runTradingCycle,
 	runTradingProtective,
@@ -87,7 +89,9 @@ import {
 	type TradeOrder,
 	type TradePerformance,
 	type TradePlan,
+	type TradeCooldownView,
 	type TradePlanRiskReview,
+	type TradeSandboxResult,
 	type TradePosition,
 	type TradeResearch,
 	type TradeReview,
@@ -370,6 +374,129 @@ function RiskReviewBlock({ review }: { review: TradePlanRiskReview }) {
  * 裁决面板：把"模型想做什么、守卫允许什么、最后下了什么单"摊开。
  * 它比一串返回消息更有用——消息告诉你有事发生，裁决告诉你为什么。
  */
+/**
+ * 冷静期条：这一轮有哪些标的/行业因为刚止损而不可买。
+ *
+ * 单独显形而不是只写在裁决里：被拦的建议在裁决列表里只有一行代码，
+ * 而"今天这只票不能碰"是交易员做决定时最需要先知道的事实。
+ */
+function CooldownBar({ view }: { view?: TradeCooldownView }) {
+	const symbols = Object.values(view?.symbols ?? {});
+	const sectors = Object.values(view?.sectors ?? {});
+	if (symbols.length === 0 && sectors.length === 0) return null;
+	return (
+		<div className="trading-cooldowns">
+			<span className="trading-subtle">止损冷静期</span>
+			{symbols.map((item) => (
+				<span key={`s-${item.symbol}`} className="trading-chip" title={`${item.reason}（至 ${item.until.slice(0, 16).replace('T', ' ')}）`}>
+					{item.symbol} 禁买至 {item.until.slice(11, 16)}
+				</span>
+			))}
+			{sectors.map((item) => (
+				<span key={`k-${item.sector}`} className="trading-chip danger" title={item.reason}>
+					{item.sector} 当日禁买
+				</span>
+			))}
+		</div>
+	);
+}
+
+const sandboxKindText: Record<string, string> = {
+	added: '放行',
+	removed: '拒绝',
+	resized: '缩量',
+	kept: '不变',
+	blocked: '拦截',
+};
+
+/**
+ * 沙盘回放：拿这一份计划的输入，换一套风控阈值重新裁决。
+ *
+ * 它是唯一能回答"换个风格会怎样"的地方，而且不需要重跑一天行情。
+ * 界面上刻意把两侧并排给出，因为单独看"激进会买 87%"没有意义，
+ * 有意义的是"稳健买 62%、激进买 87%，差在下面这三笔"。
+ */
+function SandboxPanel({ config, plan }: { config: BackendConfig; plan: TradePlan }) {
+	const [profile, setProfile] = useState(plan.trader_profile === 'aggressive' ? 'steady' : 'aggressive');
+	const [result, setResult] = useState<TradeSandboxResult | null>(null);
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState('');
+
+	const run = async () => {
+		setBusy(true);
+		setError('');
+		try {
+			const data = await sandboxTradePlan(config, plan.id, profile);
+			setResult(data);
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : '沙盘回放失败');
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	return (
+		<div className="trading-sandbox">
+			<div className="trading-review-head">
+				<GitCompareArrows size={15} />
+				<strong>沙盘回放</strong>
+				<span className="trading-subtle">同一份行情与建议，只换风控阈值；不改动真实订单</span>
+			</div>
+			<div className="trading-sandbox-controls">
+				<select value={profile} onChange={(event) => setProfile(event.target.value)} disabled={busy}>
+					<option value="steady">稳健</option>
+					<option value="balanced">均衡</option>
+					<option value="aggressive">激进</option>
+				</select>
+				<button type="button" className="trading-ghost" onClick={() => void run()} disabled={busy}>
+					{busy ? '回放中…' : `按「${profileLabel(profile)}」重算`}
+				</button>
+				{error ? <span className="trading-error-text">{error}</span> : null}
+			</div>
+			{result ? (
+				<div className="trading-sandbox-result">
+					<div className="trading-sandbox-compare">
+						<div>
+							<span className="trading-subtle">当时（{profileLabel(result.original.profile)}）</span>
+							<strong>{result.original.accepted} 笔受理 · {result.original.blocked} 笔拦截</strong>
+							<span className="trading-subtle">买入 {formatMoney(result.original.buy_notional)}</span>
+						</div>
+						<div>
+							<span className="trading-subtle">回放（{profileLabel(result.replayed.profile)}）</span>
+							<strong>{result.replayed.accepted} 笔受理 · {result.replayed.blocked} 笔拦截</strong>
+							<span className="trading-subtle">买入 {formatMoney(result.replayed.buy_notional)}</span>
+						</div>
+					</div>
+					{result.changes.length > 0 ? (
+						<ul className="trading-review-items">
+							{result.changes.map((change) => (
+								<li key={`${change.symbol}-${change.kind}`} className={change.kind === 'removed' ? 'block' : change.kind === 'added' ? 'warn' : ''}>
+									<span className="trading-role">{sandboxKindText[change.kind] ?? change.kind}</span>
+									<strong>{change.symbol}</strong>
+									<span className="trading-review-message">
+										{change.original} → {change.replayed}
+										{change.reason ? `（${change.reason}）` : ''}
+									</span>
+								</li>
+							))}
+						</ul>
+					) : (
+						<p className="trading-subtle">两种阈值下逐笔结论一致，只有额度余量不同。</p>
+					)}
+					{result.notes.map((note) => <p key={note} className="trading-subtle">{note}</p>)}
+				</div>
+			) : null}
+		</div>
+	);
+}
+
+function profileLabel(profile: string): string {
+	if (profile === 'aggressive') return '激进';
+	if (profile === 'steady') return '稳健';
+	if (profile === 'balanced') return '均衡';
+	return profile || '原风格';
+}
+
 function DecisionPanel({ plan }: { plan: TradePlan }) {
 	const [expanded, setExpanded] = useState(false);
 	const verdicts = plan.verdicts ?? [];
@@ -1261,6 +1388,8 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 							<p className="trading-plan-summary">{active.summary || active.error || '—'}</p>
 							<ResearchPanel research={active.research} />
 							<DecisionPanel plan={active} />
+							<CooldownBar view={active.snapshot.cooldowns} />
+							<SandboxPanel config={config} plan={active} />
 							{active.risk_notes && active.risk_notes.length > 0 && (
 								<ul className="trading-notes">
 									{active.risk_notes.map((note) => <li key={note}>{note}</li>)}
@@ -1340,6 +1469,15 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 												{position.stop_loss_price ? <span className="trading-line stop">{position.stop_loss_price.toFixed(2)}</span> : <span className="trading-line none">未设止损</span>}
 												{position.take_profit_price ? <span className="trading-line take">{position.take_profit_price.toFixed(2)}</span> : null}
 												{(position.reduce_count ?? 0) > 0 && <span className="trading-subtle">已止盈 {position.reduce_count} 级</span>}
+												{/* 失效条件与预期期限写在持仓上：它们是「这笔单什么时候算错」的承诺，
+												    比止损更容易被遗忘，因为它不是一个价格。 */}
+												{position.invalidation_rule?.price_below || position.invalidation ? (
+													<span className="trading-subtle" title={position.invalidation ?? ''}>
+														失效 {position.invalidation_rule?.price_below ? `跌破 ${position.invalidation_rule.price_below.toFixed(2)}` : (position.invalidation ?? '').slice(0, 18)}
+													</span>
+												) : null}
+												{position.expected_days ? <span className="trading-subtle">预期 {position.expected_days} 日</span> : null}
+												{position.auto_reduce_at ? <span className="trading-chip">已自动减仓一次</span> : null}
 											</td>
 											<td>
 												<button type="button" className="trading-link" onClick={() => setProtection({

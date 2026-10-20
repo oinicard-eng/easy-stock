@@ -88,6 +88,25 @@ func SnapshotFingerprint(snapshot Snapshot, pending []Order, blocks []BlockedInt
 	}
 
 	write("mkt=%s|%t|%.2f", snapshot.Market.Regime, snapshot.Market.Evaluated, snapshot.Market.Breadth.MedianChange)
+	// 冷静期进指纹：止损之后的那一轮是"最该重新问一次"的一轮。
+	// 漏掉它会出现最坏的组合——行情没动、持仓没动，但可买范围已经变了，
+	// 系统却认为"什么都没变"，继续沿用止损前的结论。
+	cooldownSymbols := make([]string, 0, len(snapshot.Cooldowns.Symbols))
+	for symbol := range snapshot.Cooldowns.Symbols {
+		cooldownSymbols = append(cooldownSymbols, symbol)
+	}
+	sort.Strings(cooldownSymbols)
+	for _, symbol := range cooldownSymbols {
+		write("cd=%s|%s", symbol, snapshot.Cooldowns.Symbols[symbol].Until.Format(time.RFC3339))
+	}
+	cooldownSectors := make([]string, 0, len(snapshot.Cooldowns.Sectors))
+	for sector := range snapshot.Cooldowns.Sectors {
+		cooldownSectors = append(cooldownSectors, sector)
+	}
+	sort.Strings(cooldownSectors)
+	for _, sector := range cooldownSectors {
+		write("cs=%s|%s", sector, snapshot.Cooldowns.Sectors[sector].Until.Format(time.RFC3339))
+	}
 	write("universe=%s", strings.Join(snapshot.Universe, ","))
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum)[:16]

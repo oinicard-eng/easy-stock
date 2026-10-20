@@ -36,6 +36,13 @@ const (
 	EventDrawdownWarn    = "drawdown.warn"
 	EventDrawdownStop    = "drawdown.stop"
 	EventDrawdownRelease = "drawdown.release"
+	// EventTrailStopRaised 记录止损被波动率上移。
+	// 这类调整必须留痕：复盘时"止损为什么变了"是最常见的问题，
+	// 而它既不是人改的也不是模型改的，没有事件就永远查不到。
+	EventTrailStopRaised = "guard.trail_raised"
+	// EventCycleEventTriggered 记录一次由行情异动触发的临时循环。
+	// 事件驱动轮次会消耗模型调用，必须能看到"是谁按下了这一轮"。
+	EventCycleEventTriggered = "cycle.event_triggered"
 )
 
 // Event 是一条运行事件。Payload 存结构化补充信息（标的、金额、订单号），

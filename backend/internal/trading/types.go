@@ -50,7 +50,12 @@ const (
 	TriggerHardStop   = "hard_stop"
 	TriggerModelExit  = "model_exit"
 	TriggerManualExit = "manual_exit"
-	TriggerNoTrigger  = ""
+	// TriggerInvalidation 表示买入时写下的失效条件已成立，触发减仓。
+	// 与 stop_loss 的区别是力度：失效是"论点弱了"，止损是"价格到线了"。
+	TriggerInvalidation = "invalidation"
+	// TriggerTimeStop 表示超出预期兑现期限仍未盈利，触发减仓或清仓。
+	TriggerTimeStop  = "time_stop"
+	TriggerNoTrigger = ""
 )
 
 type PlanStatus string
@@ -145,7 +150,19 @@ type Position struct {
 	// OpenedAt 是建仓时间，持仓天数与复盘归因都要用。
 	OpenedAt    *time.Time `json:"opened_at,omitempty"`
 	LastBuyDate string     `json:"last_buy_date,omitempty"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	// Thesis / Invalidation 是买入时的理由与失效条件原文。
+	// 持仓上必须留一份：计划会过期被清理，而持仓还在，界面要能回答
+	// "我当初为什么买它"——这个问题不能靠翻三个月前的计划来找。
+	Thesis       string `json:"thesis,omitempty"`
+	Invalidation string `json:"invalidation,omitempty"`
+	// InvalidationRule 是失效条件的可执行形态，由守卫按现价与持有天数判定。
+	InvalidationRule *InvalidationSpec `json:"invalidation_rule,omitempty"`
+	// ExpectedDays 是预期兑现天数（交易日），时间止损的阈值来源。
+	ExpectedDays int `json:"expected_days,omitempty"`
+	// AutoReduceAt 记录失效条件触发过一次自动减仓的时刻。
+	// 同一持仓只自动减一次：每轮都砍半，会在一次误判里用四个轮次清空仓位。
+	AutoReduceAt *time.Time `json:"auto_reduce_at,omitempty"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // Sellable 是本账本唯一的「还能卖多少股」口径。
@@ -218,9 +235,16 @@ type Order struct {
 	RejectReason string     `json:"reject_reason,omitempty"`
 	// RejectCode 是拦截规则的代码（如 sector.weight）。只存中文原因不存代码，
 	// 下一轮提示词就只能原样复述一句人话，模型无法据此判断"该改什么"。
-	RejectCode   string    `json:"reject_code,omitempty"`
-	Thesis       string    `json:"thesis,omitempty"`
-	Invalidation string    `json:"invalidation,omitempty"`
+	RejectCode   string `json:"reject_code,omitempty"`
+	Thesis       string `json:"thesis,omitempty"`
+	Invalidation string `json:"invalidation,omitempty"`
+	// InvalidationRule 是失效条件的可执行形态。与上面的 Invalidation 文本并存：
+	// 文本给人看、给模型看，结构给守卫判。两者必须同时落库，
+	// 否则要么复盘读不懂、要么代码判不了。
+	InvalidationRule *InvalidationSpec `json:"invalidation_rule,omitempty"`
+	// ExpectedDays 是模型预期的兑现天数（交易日）。时间止损的口径，
+	// 与 stop_loss_price 一起构成"什么价位、什么时限"这对完整约束。
+	ExpectedDays int       `json:"expected_days,omitempty"`
 	Confidence   float64   `json:"confidence,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -285,6 +309,9 @@ type Snapshot struct {
 	// Sectors 是本次涉及标的的行业归并结果（代码 → 大类）。
 	// 只存本次涉及的几十个，不是全市场映射：快照要随计划一起落库，不能塞进 5000 条。
 	Sectors map[string]string `json:"sectors,omitempty"`
+	// Cooldowns 是本次计划时生效的冷静期约束（止损后禁买）。
+	// 随快照落库，被拦的那笔建议三个月后还能回答"当时为什么不让我买"。
+	Cooldowns CooldownView `json:"cooldowns,omitempty"`
 }
 
 // AvailableCash 返回快照时刻真正可用于新开仓的资金。

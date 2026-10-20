@@ -101,6 +101,11 @@ type Service struct {
 	// 放在内存里：重启后必须重新问一次模型，停机期间发生了什么无法从指纹推出。
 	changeMu sync.Mutex
 	change   changeBaseline
+
+	// atrCache 缓存每只标的的 ATR 画像。日线一天只变一次，
+	// 而防守线每 15 秒看一次盘——不缓存的话，一次循环就会为每只持仓拉一遍日线。
+	atrMu    sync.Mutex
+	atrCache map[string]atrProfile
 }
 
 func NewService(store *Store, gateway agent.Gateway, quotes QuoteProvider, catalog StockCatalogProvider, logger *log.Logger) *Service {
@@ -477,6 +482,12 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	if snapshot.Equity <= 0 {
 		return fail("账户总资产异常，无法计算仓位")
 	}
+	// 冷静期在这里装配而不是在 buildSnapshot 里：它来自已平仓记录，
+	// 与行情取数无关；把它塞进取数流程会让"取不到行情"顺便丢掉这条保护。
+	if cooldowns, cdErr := s.Cooldowns(ctx, accountID); cdErr == nil && !cooldowns.Empty() {
+		snapshot.Cooldowns = cooldowns
+		plan.Snapshot.Cooldowns = cooldowns
+	}
 	// 每次判断前先量一次净值。手动模式下没有循环，若只在自动循环里观察，
 	// 关闭自动驾驶期间的回撤就永远不会被记账，一开回来直接看到"回撤 0%"。
 	if _, riskErr := s.ObserveEquity(ctx, accountID, snapshot.Equity, time.Now()); riskErr != nil {
@@ -556,6 +567,8 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		Research:   &research,
 		Pending:    pending,
 		Blocks:     blocks,
+		Cooldowns:  snapshot.Cooldowns,
+		Memories:   s.MemoriesForPrompt(ctx, accountID, snapshot, time.Now()),
 	})
 
 	startedAt := time.Now()
@@ -583,6 +596,12 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	if err != nil {
 		return fail(err.Error())
 	}
+	// 波动率校正先于预期天数补齐：补失效条件时会参考止损价，
+	// 顺序反了会把失效条件对齐到一个马上要被改掉的价位上。
+	stopVerdicts := s.AdjustDraftStops(ctx, &draft, snapshot, rules)
+	// 预期天数与失效条件在裁决之前补齐：它们会写进订单、持仓与裁决记录，
+	// 补在守卫那层的话，复盘就分不清"这个数字是模型定的还是系统默认的"。
+	ApplyHorizonDefaults(&draft, request.Horizon)
 	// 解析成功才算"这一轮真的问过模型"。在此之前记指纹，会把一次超时
 	// 变成接下来 20 分钟的静音——失败应该被重试，而不是被记住。
 	s.recordChange(fingerprint, planID, time.Now())
@@ -610,6 +629,14 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		orders[index].PlanID = planID
 		orders[index].DecisionID = decision.ID
 		orders[index].CycleID = run.cycleID
+	}
+	// 止损校正的裁决要并进同一条裁决记录：它发生在裁决之前、影响最终订单，
+	// 单独存一张表会让复盘看到"止损被改了但不知道为什么"。
+	if len(stopVerdicts) > 0 {
+		decision.Verdicts = append(stopVerdicts, decision.Verdicts...)
+		decision.Stats.Adjusted += len(stopVerdicts)
+		decision.Narrative = append([]string{"止损距离已按 ATR 校正 " + fmt.Sprintf("%d 笔", len(stopVerdicts))},
+			decision.Narrative...)
 	}
 	plan.Regime = draft.Regime
 	plan.Summary = draft.Summary

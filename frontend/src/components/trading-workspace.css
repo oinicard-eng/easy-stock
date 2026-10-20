@@ -1367,3 +1367,51 @@
 .trading-role.veto { color: #c0533f; border-color: rgba(214, 69, 69, .4); }
 .trading-role.decide { color: #b8761f; border-color: rgba(237, 195, 110, .5); }
 .trading-role.execute { color: var(--muted); }
+
+/* 冷静期条：与"持仓""挂单"并列，因为它是同一层信息——现在不能碰什么。 */
+.trading-cooldowns {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	padding: 8px 12px;
+	border-radius: 10px;
+	border: 1px solid rgba(237, 195, 110, .45);
+	background: rgba(237, 195, 110, .08);
+	font-size: var(--fs-small);
+}
+.trading-chip.danger {
+	color: #c0533f;
+	border-color: rgba(214, 69, 69, .4);
+	background: rgba(214, 69, 69, .07);
+}
+
+/* 沙盘回放：与风险复核同属"假如"类面板，视觉上要能一眼分开 */
+.trading-sandbox {
+	display: grid;
+	gap: 10px;
+	padding: 12px;
+	border-radius: 10px;
+	border: 1px dashed var(--line);
+	background: var(--theme-surface-soft, rgba(0, 0, 0, .015));
+}
+.trading-sandbox-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.trading-sandbox-controls select {
+	font-size: var(--fs-small);
+	padding: 4px 8px;
+	border-radius: 8px;
+	border: 1px solid var(--line);
+	background: var(--theme-surface, #fff);
+	color: inherit;
+}
+.trading-sandbox-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.trading-sandbox-compare > div {
+	display: grid;
+	gap: 3px;
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: var(--theme-surface, #fff);
+	border: 1px solid var(--line-soft, var(--line));
+}
+.trading-sandbox-compare strong { font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
+.trading-error-text { color: #c0533f; font-size: var(--fs-small); }

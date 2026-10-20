@@ -22,8 +22,13 @@ type DraftOrder struct {
 	StopLossPrice       float64 `json:"stop_loss_price,omitempty"`
 	TakeProfitPrice     float64 `json:"take_profit_price,omitempty"`
 	Thesis              string  `json:"thesis,omitempty"`
-	Invalidation        string  `json:"invalidation,omitempty"`
-	Confidence          float64 `json:"confidence,omitempty"`
+	// Invalidation 接受两种 JSON 形态：结构化对象，或一句中文。
+	// 兼容字符串不是留后门，而是因为模型经常无视格式要求直接写人话，
+	// 而一份"因为格式不对被整份拒绝"的计划，比一份条件被降级解析的计划更糟。
+	Invalidation InvalidationSpec `json:"invalidation,omitempty"`
+	// ExpectedDays 是预期兑现天数（交易日），时间止损据此判定。
+	ExpectedDays int     `json:"expected_days,omitempty"`
+	Confidence   float64 `json:"confidence,omitempty"`
 }
 
 type DraftPlan struct {
@@ -123,7 +128,9 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 			Side:                Side(strings.ToLower(strings.TrimSpace(item.Side))),
 			Status:              OrderStatusPending,
 			Thesis:              strings.TrimSpace(item.Thesis),
-			Invalidation:        strings.TrimSpace(item.Invalidation),
+			Invalidation:        describeInvalidation(&item.Invalidation, item.Invalidation.Note),
+			InvalidationRule:    rulePointer(item.Invalidation),
+			ExpectedDays:        normalizeExpectedDays(item.ExpectedDays),
 			Confidence:          normalizeConfidence(item.Confidence),
 			OrderType:           OrderType(strings.ToLower(strings.TrimSpace(item.OrderType))),
 			CreatedAt:           now,
@@ -254,7 +261,20 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 				block(&order, verdict)
 				continue
 			}
-			amount := equity * item.TargetWeightPercent / 100
+			// 置信度定价：模型自己也没把握的建议，凭什么按它要的份额下单。
+			// 位置在单票上限校验之后：先判断"这个目标是否越界"，
+			// 再按置信度打折。反过来的话，25% 的建议打成 17% 就"合法"了。
+			targetWeight := item.TargetWeightPercent
+			if factor, factorNote := confidenceFactor(order.Confidence); factor < 1 {
+				targetWeight = round2(item.TargetWeightPercent * factor)
+				verdicts = append(verdicts, policy.Verdict{
+					Code: policy.CodeSizingConfidence, Level: policy.LevelAdjust, Scope: policy.ScopeOrder,
+					Field: field, Symbol: order.Symbol, Metric: item.TargetWeightPercent, Limit: targetWeight,
+					Message: fmt.Sprintf("%s %s，目标权重 %.2f%% → %.2f%%（系数 %.2f）",
+						order.Symbol, factorNote, item.TargetWeightPercent, targetWeight, factor),
+				})
+			}
+			amount := equity * targetWeight / 100
 			quantity := roundSharesDown(int(amount/entry), lot)
 			// 立刻回写到订单上，不能等到最后"通过"时才赋值。
 			// 后续任何一条拦截（资金、单笔风险、行业集中度）都要能带上
@@ -299,6 +319,14 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 					Message: fmt.Sprintf("%s 按可用资金缩减为 %d 股", order.Symbol, quantity),
 				})
 			}
+			// 冷静期：刚在这只票（或这个行业）上止损，今天不回到同一个坑里。
+			// 位置在数量算出之后：被拦的建议必须带着"原本想买多少"，
+			// 拦在算数量之前会留下一条 0 股的记录，复盘时看不出模型的原意。
+			if verdict, ok := snapshot.Cooldowns.Block(order.Symbol, order.Sector, now); !ok {
+				verdict.Field = field
+				block(&order, verdict)
+				continue
+			}
 			if verdict, ok := rules.CheckTradeRisk(order.Symbol, float64(quantity)*(entry-order.StopLossPrice), equity); !ok {
 				verdict.Field = field
 				block(&order, verdict)
@@ -306,13 +334,16 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 			}
 			// 组合守卫放在最后：前面都过了才占用组合额度，
 			// 否则被拒的订单会白白吃掉行业名额与仓位预算。
-			if verdict, ok := book.TryBuy(order.Symbol, order.Sector, item.TargetWeightPercent); !ok {
+			if verdict, ok := book.TryBuy(order.Symbol, order.Sector, targetWeight); !ok {
 				verdict.Field = field
 				block(&order, verdict)
 				continue
 			}
 			order.Source = OrderSourceModel
 			order.Quantity = quantity
+			// 订单上写实际生效的权重，而不是模型原话：界面显示"目标 10%"
+			// 而实际只买了 7%，是最容易让人以为系统算错的一种偏差。
+			order.TargetWeightPercent = targetWeight
 			cashLeft = round2(cashLeft - notional - fee)
 			buyNotional += notional
 		} else {
@@ -461,6 +492,89 @@ func normalizeConfidence(value float64) float64 {
 		value = 1
 	}
 	return round2(value)
+}
+
+// rulePointer 只在条件真的可执行时才返回指针。
+// 返回空结构会让守卫误以为"有失效条件"，每条持仓都进一次判定分支。
+func rulePointer(spec InvalidationSpec) *InvalidationSpec {
+	if spec.Empty() {
+		return nil
+	}
+	cloned := spec
+	return &cloned
+}
+
+// normalizeExpectedDays 把预期天数拉回合理区间。0 表示"模型没给"，
+// 由调用方按计划周期推断；给 0 与给 365 一样不可执行。
+func normalizeExpectedDays(value int) int {
+	if value <= 0 || value > 120 {
+		return 0
+	}
+	return value
+}
+
+// confidenceFactor 把模型自评的置信度换算成仓位系数。
+//
+// 只在明显低置信区打折，理由来自这类自评的分布：0.6–0.8 几乎是模型的默认值，
+// 区分度极低；真正有信息量的是"低于 0.5 还硬要买"——那往往意味着它在凑数。
+// 若对所有值都打折，等于给每个建议都施加同一个系数，反而看不出差别。
+//
+// 0 不罚：归一化后 0 表示"模型没填"，而不是"极度不确定"。
+// 把它当极度不确定罚一刀，会让所有省略该字段的旧格式建议被打折，
+// 而复盘时找不到任何解释。
+func confidenceFactor(value float64) (float64, string) {
+	switch {
+	case value <= 0:
+		return 1, ""
+	case value < 0.45:
+		return 0.7, fmt.Sprintf("置信度 %.2f 明显偏低", value)
+	case value < 0.55:
+		return 0.9, fmt.Sprintf("置信度 %.2f 偏低", value)
+	default:
+		return 1, ""
+	}
+}
+
+// ApplyHorizonDefaults 在裁决之前补齐模型没给的预期天数与失效条件兜底。
+//
+// 为什么要在裁决前做而不是在下单时：这两项会写进订单、写进持仓、写进裁决记录。
+// 到了守卫那一层再补，裁决里就看不到"这个数字是谁定的"，复盘会把系统默认值
+// 当成模型自己的判断。
+func ApplyHorizonDefaults(draft *DraftPlan, horizon string) {
+	days := expectedDaysForHorizon(horizon)
+	for index := range draft.Orders {
+		order := &draft.Orders[index]
+		if Side(strings.ToLower(strings.TrimSpace(order.Side))) != SideBuy {
+			continue
+		}
+		if order.ExpectedDays <= 0 {
+			order.ExpectedDays = days
+		}
+		// 失效条件与止损价重合时，把失效条件下的“论点失效”抬到止损线上方一点，
+		// 否则价格先到失效条件再触发止损，减仓与清仓会在同一秒各执行一次。
+		if rule := &order.Invalidation; rule.PriceBelow > 0 && order.StopLossPrice > 0 && rule.PriceBelow <= order.StopLossPrice {
+			rule.PriceBelow = round2(order.StopLossPrice * 1.005)
+		}
+	}
+}
+
+// expectedDaysForHorizon 把计划周期映射成默认兑现天数。
+// 只做关键词匹配，匹配不到给 10 天：比 0（等于关闭时间止损）安全，
+// 比 3 天（等于对波段仓位施加日内纪律）更不容易误伤。
+func expectedDaysForHorizon(horizon string) int {
+	value := strings.ToLower(strings.TrimSpace(horizon))
+	switch {
+	case strings.Contains(value, "日内") || strings.Contains(value, "超短") || strings.Contains(value, "intraday"):
+		return 2
+	case strings.Contains(value, "短") || strings.Contains(value, "swing"):
+		return 5
+	case strings.Contains(value, "中") || strings.Contains(value, "mid"):
+		return 20
+	case strings.Contains(value, "长") || strings.Contains(value, "long"):
+		return 40
+	default:
+		return 10
+	}
 }
 
 func firstNonEmpty(values ...string) string {

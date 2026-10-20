@@ -320,7 +320,6 @@ func (t *Toolbox) listSectorStocks(args map[string]any) (ToolOutcome, error) {
 	return ToolOutcome{Text: clipToolText(builder.String()), Data: rows, Rows: len(rows), Truncated: truncated}, nil
 }
 
-
 // getKline 返回日线技术位置。
 //
 // 它回答的是提示词表格回答不了的问题：这只票在趋势的哪个位置、波动有多大。
