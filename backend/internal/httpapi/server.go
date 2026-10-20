@@ -39,6 +39,7 @@ import (
 	"easy-stock/backend/internal/strategy/inflection"
 	"easy-stock/backend/internal/themeindex"
 	"easy-stock/backend/internal/themelibrary"
+	"easy-stock/backend/internal/trading"
 )
 
 type Server struct {
@@ -92,6 +93,9 @@ type Server struct {
 	portfolioScheduler       *portfolioinspection.Scheduler
 	portfolioOptimization    *portfoliooptimization.Service
 	portfolioExpectation     *portfolioinspection.ExpectationService
+	trading                  *trading.Service
+	tradingStore             *trading.Store
+	autopilot                *trading.Autopilot
 	stockResearchStore       *stockanalysis.ResearchStore
 	stockResearch            *stockanalysis.ResearchService
 	reviewImporter           ReviewImporter
@@ -304,6 +308,17 @@ func NewServer(config any) *Server {
 			cfg.PortfolioStore, _ = portfolioinspection.OpenStore(":memory:")
 		}
 	}
+	if cfg.TradingStore == nil {
+		path := strings.TrimSpace(cfg.TradingDBPath)
+		store, err := trading.OpenStore(path)
+		if err != nil {
+			if cfg.StrictPersistence {
+				startupErrors = append(startupErrors, fmt.Errorf("open trading database: %w", err))
+			}
+			store, _ = trading.OpenStore(":memory:")
+		}
+		cfg.TradingStore = store
+	}
 	if cfg.StockResearchStore == nil {
 		store, err := stockanalysis.OpenResearchStore(cfg.StockResearchDBPath)
 		if err != nil {
@@ -467,6 +482,18 @@ func NewServer(config any) *Server {
 	s.notifications = notification.NewDispatcher(func(ctx context.Context, channel string, cfg appsettings.NotificationChannel, message notification.Message) error {
 		return s.notificationSender.Send(ctx, channel, cfg, message)
 	}, func() appsettings.Notifications { return s.settingsStore.Snapshot().Notifications }, cfg.Logger)
+	s.tradingStore = cfg.TradingStore
+	if s.tradingStore != nil {
+		s.trading = trading.NewService(cfg.TradingStore, usageGateway, s.realtimeProvider, s.stockDirectory, cfg.Logger)
+		// 板块资金流是可选能力：行情总览服务碰巧实现了它就直接接上，
+		// 没实现也不影响交易，只是模型查不到资金流。
+		if flow, ok := s.marketOverview.(trading.SectorFlowProvider); ok && flow != nil {
+			s.trading.SetSectorFlow(flow)
+		}
+		// 自动循环只构造不启动：Start 由 main 在服务可用之后显式调用。
+		// 构造时启动会让"刚部署完就自动开始交易"变成默认行为。
+		s.autopilot = trading.NewAutopilot(s.trading, cfg.Logger)
+	}
 	s.stockResearch = stockanalysis.NewResearchServiceWithPreparation(cfg.StockResearchStore, s.runStockResearch, s.prepareStockResearch, s.notifyStockResearch)
 	s.portfolioInspection = portfolioinspection.NewService(cfg.PortfolioStore, usageGateway, s.analyzeStock, cfg.Logger, s.analyzeHoldingResearch)
 	s.portfolioInspection.ConfigureCompletion(s.notifyPortfolioInspection)
@@ -527,6 +554,9 @@ func (s *Server) Close() error {
 	}
 	if s.portfolioScheduler != nil {
 		s.portfolioScheduler.Close()
+	}
+	if s.autopilot != nil {
+		s.autopilot.Stop()
 	}
 	var closeErrors []error
 	if s.notifications != nil {
@@ -606,6 +636,19 @@ func (s *Server) RunMarketEmotionScheduler(ctx context.Context) {
 			s.marketEmotion.runScheduler(ctx, s.logger)
 		})
 	}
+}
+
+// RunTradingAutopilot 常驻运行自动交易循环。
+//
+// 开关不在启动时判断：循环要不要跑是运行期事实，由配置决定。
+// 这里只负责让它"活着"，否则用户打开开关后必须重启进程才生效。
+func (s *Server) RunTradingAutopilot(ctx context.Context) {
+	if s.autopilot == nil {
+		return
+	}
+	s.autopilot.Start(ctx)
+	defer s.autopilot.Stop()
+	<-ctx.Done()
 }
 
 // RunSectorFlowSampler 常驻记录板块资金流快照，让分时资金/价格曲线在上游
@@ -741,6 +784,46 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/portfolio-inspections/{id}/resume", s.portfolioInspectionResume)
 	s.mux.HandleFunc("POST /api/v1/portfolio-inspections/{id}/bind-plan", s.portfolioInspectionBindPlan)
 	s.mux.HandleFunc("POST /api/v1/portfolio-inspections/{id}/cancel", s.portfolioInspectionCancel)
+	s.mux.HandleFunc("GET /api/v1/trading/account", s.tradingAccount)
+	s.mux.HandleFunc("POST /api/v1/trading/account/reset", s.tradingResetAccount)
+	s.mux.HandleFunc("GET /api/v1/trading/market", s.tradingMarket)
+	s.mux.HandleFunc("GET /api/v1/trading/universe", s.tradingUniverse)
+	s.mux.HandleFunc("GET /api/v1/trading/control", s.tradingControlGet)
+	s.mux.HandleFunc("POST /api/v1/trading/control", s.tradingControlSet)
+	s.mux.HandleFunc("GET /api/v1/trading/autopilot", s.tradingAutopilotStatus)
+	s.mux.HandleFunc("POST /api/v1/trading/autopilot", s.tradingAutopilotConfigure)
+	s.mux.HandleFunc("POST /api/v1/trading/autopilot/breaker/reset", s.tradingBreakerReset)
+	// 持仓管理：防守线由确定性代码执行，人工只能设置线本身。
+	s.mux.HandleFunc("GET /api/v1/trading/positions", s.tradingPositions)
+	s.mux.HandleFunc("POST /api/v1/trading/positions/{symbol}/protection", s.tradingPositionProtection)
+	s.mux.HandleFunc("POST /api/v1/trading/protective/run", s.tradingProtectiveRun)
+	// 复盘：事实由账本算，接口只读或触发重算。
+	s.mux.HandleFunc("GET /api/v1/trading/closed-trades", s.tradingClosedTrades)
+	s.mux.HandleFunc("GET /api/v1/trading/performance", s.tradingPerformance)
+	s.mux.HandleFunc("GET /api/v1/trading/memory", s.tradingMemory)
+	s.mux.HandleFunc("POST /api/v1/trading/memory/sync", s.tradingMemorySync)
+	s.mux.HandleFunc("GET /api/v1/trading/plans/{id}/research", s.tradingPlanResearch)
+	s.mux.HandleFunc("GET /api/v1/trading/reviews", s.tradingReviewList)
+	s.mux.HandleFunc("POST /api/v1/trading/reviews/run", s.tradingReviewRun)
+	s.mux.HandleFunc("GET /api/v1/trading/reviews/{day}", s.tradingReviewGet)
+	s.mux.HandleFunc("GET /api/v1/trading/cycles", s.tradingCycleList)
+	s.mux.HandleFunc("POST /api/v1/trading/cycles/run", s.tradingCycleRun)
+	s.mux.HandleFunc("POST /api/v1/trading/reconcile", s.tradingReconcile)
+	// 运维面：健康检查给监控用，事件流给人排障用。
+	s.mux.HandleFunc("GET /api/v1/trading/health", s.tradingHealth)
+	s.mux.HandleFunc("GET /api/v1/trading/events", s.tradingEvents)
+	s.mux.HandleFunc("GET /api/v1/trading/channel", s.tradingChannel)
+	// 委托回报入口：接实盘时由券商回调或轮询器推入，ReportID 保证幂等。
+	s.mux.HandleFunc("POST /api/v1/trading/reports", s.tradingReportSubmit)
+	s.mux.HandleFunc("POST /api/v1/trading/plans", s.tradingPlanCreate)
+	s.mux.HandleFunc("GET /api/v1/trading/plans", s.tradingPlanList)
+	s.mux.HandleFunc("GET /api/v1/trading/decisions", s.tradingDecisionList)
+	s.mux.HandleFunc("GET /api/v1/trading/decisions/{id}", s.tradingDecisionGet)
+	s.mux.HandleFunc("GET /api/v1/trading/plans/{id}", s.tradingPlanGet)
+	s.mux.HandleFunc("POST /api/v1/trading/plans/{id}/execute", s.tradingPlanExecute)
+	s.mux.HandleFunc("POST /api/v1/trading/plans/{id}/reject", s.tradingPlanReject)
+	s.mux.HandleFunc("POST /api/v1/trading/match", s.tradingMatchPending)
+	s.mux.HandleFunc("POST /api/v1/trading/orders/{id}/cancel", s.tradingOrderCancel)
 	s.mux.HandleFunc("POST /api/v1/reviews/portfolio-expectations", s.portfolioExpectationCreate)
 	s.mux.HandleFunc("GET /api/v1/reviews/portfolio-expectations/latest", s.portfolioExpectationLatest)
 	s.mux.HandleFunc("GET /api/v1/reviews/portfolio-expectations/{id}", s.portfolioExpectationGet)

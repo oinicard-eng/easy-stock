@@ -1,0 +1,1137 @@
+.trading-workspace {
+	display: grid;
+	gap: 16px;
+	padding: 4px 0 28px;
+	color: var(--text);
+}
+
+.trading-banner {
+	display: flex;
+	gap: 12px;
+	align-items: flex-start;
+	padding: 14px 16px;
+	border: 1px solid #b8761f;
+	border-radius: 12px;
+	background: var(--theme-surface-soft, rgba(237, 195, 110, .08));
+	color: var(--text);
+}
+
+.trading-banner svg { flex-shrink: 0; color: var(--amber, #edc36e); margin-top: 2px; }
+.trading-banner strong { display: block; font-size: var(--fs-body); }
+.trading-banner span { display: block; margin-top: 4px; font-size: var(--fs-small); color: var(--muted); line-height: var(--lh-reading); }
+
+/* 账户门控条：三态用左侧色条区分，避免只靠文字判断当前是否还能交易 */
+.trading-control {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	align-items: center;
+	justify-content: space-between;
+	padding: 12px 16px;
+	border: 1px solid var(--line);
+	border-left-width: 3px;
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+}
+
+.trading-control.normal { border-left-color: #2f9e6f; }
+.trading-control.pause { border-left-color: #edc36e; }
+.trading-control.halt {
+	border-left-color: #d64545;
+	background: rgba(214, 69, 69, .06);
+}
+
+.trading-control-state { display: flex; gap: 10px; align-items: flex-start; min-width: 0; }
+.trading-control-state svg { flex-shrink: 0; margin-top: 2px; }
+.trading-control.normal .trading-control-state svg { color: #2f9e6f; }
+.trading-control.pause .trading-control-state svg { color: #c98a1f; }
+.trading-control.halt .trading-control-state svg { color: #c0533f; }
+.trading-control-state strong { display: block; font-size: var(--fs-body); }
+.trading-control-state span {
+	display: block;
+	margin-top: 2px;
+	font-size: var(--fs-small);
+	color: var(--muted);
+	line-height: var(--lh-reading);
+}
+
+.trading-control-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.trading-summary {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 12px;
+}
+
+.trading-summary article {
+	display: grid;
+	gap: 6px;
+	padding: 14px 16px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+}
+
+.trading-summary span { font-size: var(--fs-small); color: var(--muted); }
+.trading-summary strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+.trading-summary em { font-size: var(--fs-small); font-style: normal; color: var(--muted); }
+.trading-summary .up { color: var(--up, #d64545); }
+.trading-summary .down { color: var(--down, #2f9e6f); }
+
+.trading-notice {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 10px 14px;
+	border-radius: 10px;
+	font-size: var(--fs-body);
+	border: 1px solid var(--line);
+	background: var(--theme-surface-soft, #f6f9fc);
+}
+
+.trading-notice.error { border-color: #c0533f; color: #c0533f; }
+.trading-notice.ok { border-color: #2f8f63; color: #2f8f63; }
+.trading-notice span { flex: 1; }
+.trading-notice button { border: 0; background: none; color: inherit; cursor: pointer; font-size: var(--fs-small); opacity: .7; }
+
+.trading-grid {
+	display: grid;
+	grid-template-columns: 340px minmax(0, 1fr);
+	gap: 16px;
+	align-items: start;
+}
+
+.trading-panel {
+	display: grid;
+	gap: 12px;
+	padding: 16px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+	min-width: 0;
+}
+
+.trading-panel > header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.trading-panel > header h2 { margin: 0; font-size: var(--fs-body); font-weight: 600; }
+.trading-panel > header svg { color: var(--theme-blue, #2476d2); }
+.trading-panel > header .trading-ghost,
+.trading-panel > header .trading-status { margin-left: auto; }
+.trading-subtle { margin-left: auto; font-size: var(--fs-small); color: var(--muted); }
+
+.trading-panel label { display: grid; gap: 6px; font-size: var(--fs-small); color: var(--muted); }
+.trading-panel textarea,
+.trading-panel select {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: var(--theme-surface, #fff);
+	color: var(--text);
+	font: inherit;
+	font-size: var(--fs-body);
+	resize: vertical;
+}
+
+.trading-panel textarea:focus,
+.trading-panel select:focus { outline: 2px solid var(--theme-blue, #2476d2); outline-offset: -1px; }
+
+.trading-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.trading-primary,
+.trading-ghost {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	padding: 9px 14px;
+	border-radius: 8px;
+	border: 1px solid var(--line);
+	background: var(--theme-surface, #fff);
+	color: var(--text);
+	font: inherit;
+	font-size: var(--fs-body);
+	cursor: pointer;
+	transition: background-color .15s, border-color .15s;
+}
+
+.trading-primary {
+	border-color: var(--theme-blue, #2476d2);
+	background: var(--theme-blue, #2476d2);
+	color: #fff;
+}
+
+.trading-primary:hover:not(:disabled) { filter: brightness(1.06); }
+.trading-ghost:hover:not(:disabled) { background: var(--theme-surface-soft, #f2f6fa); }
+.trading-ghost.danger { color: #c0533f; border-color: rgba(192, 83, 63, .5); }
+.trading-ghost.active {
+	background: var(--theme-surface-soft, #f2f6fa);
+	border-color: currentColor;
+	font-weight: 600;
+}
+.trading-ghost.danger.active { background: rgba(192, 83, 63, .1); }
+.trading-primary:disabled,
+.trading-ghost:disabled { opacity: .5; cursor: not-allowed; }
+
+.trading-link {
+	border: 0;
+	background: none;
+	padding: 0;
+	color: var(--theme-blue, #2476d2);
+	font: inherit;
+	font-size: var(--fs-small);
+	cursor: pointer;
+	text-align: left;
+}
+
+.trading-hint { margin: 0; font-size: var(--fs-small); color: var(--muted); line-height: var(--lh-reading); }
+.trading-hint.warn { color: #b8761f; }
+.trading-empty { margin: 0; padding: 24px 0; text-align: center; color: var(--muted); font-size: var(--fs-body); }
+
+.trading-plan-head {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	justify-content: space-between;
+	align-items: flex-start;
+}
+
+.trading-plan-head > div:first-child { display: grid; gap: 4px; }
+.trading-plan-head strong { font-size: var(--fs-body); }
+.trading-plan-head span { font-size: var(--fs-small); color: var(--muted); }
+.trading-plan-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.trading-plan-summary { margin: 0; font-size: var(--fs-body); line-height: var(--lh-reading); }
+
+.trading-notes,
+.trading-issues { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: var(--fs-small); color: var(--muted); }
+.trading-issues .error { color: #c0533f; }
+.trading-issues .warning { color: #b8761f; }
+
+.trading-table-wrap { overflow-x: auto; }
+.trading-table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); }
+.trading-table th {
+	text-align: left;
+	font-weight: 500;
+	color: var(--muted);
+	padding: 8px 10px;
+	border-bottom: 1px solid var(--line);
+	white-space: nowrap;
+}
+.trading-table td { padding: 9px 10px; border-bottom: 1px solid var(--line-soft, var(--line)); vertical-align: top; }
+.trading-table td strong { display: block; font-weight: 600; }
+.trading-table td span { display: block; color: var(--muted); font-size: var(--fs-small); }
+.trading-table td.up { color: var(--up, #d64545); }
+.trading-table td.down { color: var(--down, #2f9e6f); }
+.trading-table tr.rejected { opacity: .65; }
+.trading-cell-note { max-width: 260px; color: var(--muted); line-height: 1.5; }
+.trading-empty-cell { text-align: center; color: var(--muted); padding: 18px 0; }
+
+.trading-order-status,
+.trading-status {
+	display: inline-block;
+	padding: 2px 8px;
+	border-radius: 999px;
+	border: 1px solid var(--line);
+	font-size: 12px;
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.trading-status.draft { color: #b8761f; border-color: rgba(184, 118, 31, .5); }
+.trading-status.running { color: var(--theme-blue, #2476d2); border-color: rgba(36, 118, 210, .5); }
+.trading-status.executed { color: #2f8f63; border-color: rgba(47, 143, 99, .5); }
+.trading-status.failed,
+.trading-status.rejected { color: #c0533f; border-color: rgba(192, 83, 63, .5); }
+.trading-order-status.filled { color: #2f8f63; border-color: rgba(47, 143, 99, .5); }
+.trading-order-status.pending { color: #b8761f; border-color: rgba(184, 118, 31, .5); }
+.trading-order-status.rejected { color: #c0533f; border-color: rgba(192, 83, 63, .5); }
+
+.trading-pending { display: grid; gap: 8px; }
+.trading-pending-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 10px 12px;
+	border: 1px dashed var(--line);
+	border-radius: 10px;
+}
+.trading-pending-item div { display: grid; gap: 4px; }
+.trading-pending-item span { font-size: var(--fs-small); color: var(--muted); }
+
+.trading-history { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.trading-history li button {
+	width: 100%;
+	display: grid;
+	grid-template-columns: auto auto 1fr;
+	gap: 4px 12px;
+	align-items: center;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--theme-surface, #fff);
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+.trading-history li button.active { border-color: var(--theme-blue, #2476d2); background: var(--theme-surface-soft, rgba(36, 118, 210, .06)); }
+.trading-history li button strong { font-size: var(--fs-body); }
+.trading-history li button span { font-size: var(--fs-small); color: var(--muted); }
+.trading-history li button em { justify-self: end; }
+.trading-history li button small { grid-column: 1 / -1; color: var(--muted); font-size: var(--fs-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 市场环境：左侧色条表达状态，与门控条同一套视觉语言 */
+.trading-market {
+	display: grid;
+	gap: 12px;
+	padding: 14px 16px;
+	border: 1px solid var(--line);
+	border-left-width: 3px;
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+}
+
+.trading-market.regime-panic { border-left-color: #d64545; }
+.trading-market.regime-ebb { border-left-color: #c0533f; }
+.trading-market.regime-range { border-left-color: #8a94a6; }
+.trading-market.regime-uptrend { border-left-color: #2f9e6f; }
+.trading-market.regime-euphoria { border-left-color: #edc36e; }
+.trading-market.regime-unknown { border-left-color: var(--muted, #7a8496); }
+
+.trading-market-head {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	align-items: flex-start;
+	justify-content: space-between;
+}
+
+.trading-market-title { display: flex; gap: 10px; align-items: flex-start; }
+.trading-market-title svg { flex-shrink: 0; margin-top: 2px; color: var(--muted, #7a8496); }
+.trading-market-title strong { display: block; font-size: var(--fs-body); }
+.trading-market-title span { display: block; margin-top: 3px; font-size: var(--fs-small); color: var(--muted); }
+
+.trading-market-grid {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 10px;
+	padding-top: 10px;
+	border-top: 1px dashed var(--line);
+}
+
+.trading-market-grid > div { display: grid; gap: 3px; }
+.trading-market-grid span { font-size: var(--fs-small); color: var(--muted); }
+.trading-market-grid strong { font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
+.trading-market-grid .up { color: var(--up, #d64545); }
+.trading-market-grid .down { color: var(--down, #2f9e6f); }
+
+/* 折叠区：默认收起，避免首屏被长文本淹没 */
+.trading-details { border-top: 1px dashed var(--line); padding-top: 8px; }
+.trading-details > summary {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+	cursor: pointer;
+	font-size: var(--fs-small);
+	color: var(--muted);
+	list-style: none;
+	user-select: none;
+}
+.trading-details > summary::-webkit-details-marker { display: none; }
+.trading-details[open] > summary { color: var(--text); }
+.trading-details[open] > summary svg { transform: rotate(180deg); }
+.trading-details > summary svg { transition: transform .15s ease; }
+
+.trading-note-list { display: grid; gap: 6px; margin: 10px 0 0; padding-left: 18px; font-size: var(--fs-small); line-height: var(--lh-reading); color: var(--muted); }
+.trading-note-list li::marker { color: var(--line); }
+
+.trading-industry-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.trading-industry-chips span {
+	display: inline-flex;
+	gap: 5px;
+	align-items: baseline;
+	padding: 3px 8px;
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	font-size: var(--fs-small);
+	font-variant-numeric: tabular-nums;
+}
+.trading-industry-chips span.up { border-color: rgba(214, 69, 69, .35); color: var(--up, #d64545); }
+.trading-industry-chips span.down { border-color: rgba(47, 158, 111, .35); color: var(--down, #2f9e6f); }
+.trading-industry-chips em { font-style: normal; color: var(--muted); }
+
+/* 候选池 */
+.trading-universe {
+	display: grid;
+	gap: 10px;
+	padding: 14px 16px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+}
+
+.trading-universe.empty {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	font-size: var(--fs-small);
+	color: var(--muted);
+}
+
+.trading-universe-head {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	align-items: flex-start;
+	justify-content: space-between;
+}
+.trading-universe-head strong { display: flex; gap: 6px; align-items: center; font-size: var(--fs-body); }
+.trading-universe-head span { display: block; margin-top: 4px; font-size: var(--fs-small); color: var(--muted); }
+
+.trading-universe-table { overflow-x: auto; }
+.trading-universe-table table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); }
+.trading-universe-table th {
+	padding: 6px 8px;
+	text-align: left;
+	font-weight: 500;
+	color: var(--muted);
+	border-bottom: 1px solid var(--line);
+	white-space: nowrap;
+}
+.trading-universe-table td {
+	padding: 7px 8px;
+	border-bottom: 1px solid var(--line);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+.trading-universe-table tr:last-child td { border-bottom: none; }
+.trading-universe-table td strong { display: block; font-weight: 500; }
+.trading-universe-table td span { display: block; color: var(--muted); font-size: 11px; }
+.trading-universe-table .up { color: var(--up, #d64545); }
+.trading-universe-table .down { color: var(--down, #2f9e6f); }
+
+.trading-reason-list { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.trading-reason-list li { display: grid; gap: 2px; font-size: var(--fs-small); line-height: var(--lh-reading); }
+.trading-reason-list strong { font-weight: 500; }
+.trading-reason-list span { color: var(--muted); }
+
+.trading-universe-empty {
+	margin: 0;
+	padding: 10px 12px;
+	border: 1px dashed var(--line);
+	border-radius: 8px;
+	font-size: var(--fs-small);
+	color: var(--muted);
+}
+
+/* 标记：本轮标的由系统自动选出，与人工填写区分开 */
+.trading-tag {
+	display: inline-flex;
+	gap: 4px;
+	align-items: center;
+	padding: 2px 8px;
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	font-size: 11px;
+	color: var(--muted);
+}
+
+.spin { animation: trading-spin 1s linear infinite; }
+@keyframes trading-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 760px) {
+	.trading-market-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 1100px) {
+	.trading-grid { grid-template-columns: 1fr; }
+	.trading-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 620px) {
+	.trading-summary { grid-template-columns: 1fr; }
+}
+
+/* 裁决面板：把"模型想做什么、守卫允许什么"逐条摊开，而不是只给一句拒绝理由 */
+.trading-decision {
+	display: grid;
+	gap: 10px;
+	padding: 12px 14px;
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--accent, #4a7dff);
+	border-radius: 12px;
+	background: var(--theme-surface-soft, rgba(74, 125, 255, .04));
+}
+
+.trading-decision-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.trading-decision-head svg { color: var(--accent, #4a7dff); }
+.trading-decision-head strong { font-size: var(--fs-body); }
+.trading-decision-id {
+	margin-left: auto;
+	font-size: 11px;
+	padding: 2px 6px;
+	border-radius: 6px;
+	background: var(--theme-surface, #fff);
+	border: 1px solid var(--line);
+	color: var(--muted);
+}
+
+.trading-exposure { display: grid; gap: 6px; }
+.trading-exposure-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: var(--fs-small); }
+.trading-exposure-row strong { font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
+.trading-arrow { color: var(--muted); }
+.trading-exposure-bar {
+	height: 6px;
+	border-radius: 999px;
+	background: var(--line-soft, var(--line));
+	overflow: hidden;
+}
+.trading-exposure-bar > span {
+	display: block;
+	height: 100%;
+	border-radius: 999px;
+	background: var(--accent, #4a7dff);
+	transition: width .3s ease;
+}
+
+.trading-sector-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.trading-chip {
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 999px;
+	border: 1px solid var(--line);
+	background: var(--theme-surface, #fff);
+	color: var(--muted);
+}
+
+.trading-verdicts { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.trading-verdicts li {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: baseline;
+	padding: 6px 8px;
+	border-radius: 8px;
+	font-size: var(--fs-small);
+	background: var(--theme-surface, #fff);
+	border: 1px solid var(--line-soft, var(--line));
+}
+.trading-verdicts li.block { border-left: 2px solid #d64545; }
+.trading-verdicts li.adjust { border-left: 2px solid #edc36e; }
+.trading-verdicts li.warn { border-left: 2px solid var(--line); }
+
+.trading-verdict-level {
+	flex-shrink: 0;
+	font-size: 11px;
+	padding: 1px 6px;
+	border-radius: 6px;
+	background: var(--theme-surface-soft, #f4f5f7);
+}
+.trading-verdict-level.block { color: #c0533f; background: rgba(214, 69, 69, .1); }
+.trading-verdict-level.adjust { color: #b8761f; background: rgba(237, 195, 110, .16); }
+.trading-verdict-level.warn { color: var(--muted); }
+
+.trading-verdict-code { font-size: 11px; color: var(--muted); }
+.trading-verdict-scope { font-size: 11px; color: var(--muted); }
+.trading-verdict-symbol { font-weight: 600; }
+.trading-verdict-message { flex: 1 1 240px; line-height: var(--lh-reading); }
+.trading-verdict-metric { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* 自动循环面板：开关、闸门、熔断同屏，避免"开关打开=会交易"的误解 */
+.trading-autopilot {
+	display: grid;
+	gap: 12px;
+	padding: 14px 16px;
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--theme-blue, #2476d2);
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+}
+
+.trading-autopilot > header {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+}
+
+.trading-autopilot > header svg { color: var(--theme-blue, #2476d2); }
+.trading-autopilot > header h2 { margin: 0; font-size: var(--fs-body); }
+.trading-auto-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+
+.trading-auto-tag {
+	padding: 2px 8px;
+	border-radius: 999px;
+	border: 1px solid var(--line);
+	font-size: 12px;
+	white-space: nowrap;
+}
+.trading-auto-tag.on { color: #2f8f63; border-color: rgba(47, 143, 99, .5); }
+.trading-auto-tag.off { color: var(--muted); }
+
+.trading-auto-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+	gap: 10px;
+}
+
+.trading-switch {
+	display: grid;
+	gap: 4px;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--theme-surface-soft, rgba(0, 0, 0, .02));
+	text-align: left;
+	cursor: pointer;
+	font: inherit;
+	color: inherit;
+}
+.trading-switch span { font-size: var(--fs-small); color: var(--muted); }
+.trading-switch strong { font-size: var(--fs-body); }
+.trading-switch.on { border-color: rgba(47, 143, 99, .55); background: rgba(47, 143, 99, .08); }
+.trading-switch.on strong { color: #2f8f63; }
+.trading-switch:disabled { opacity: .6; cursor: not-allowed; }
+
+.trading-auto-field { display: grid; gap: 4px; font-size: var(--fs-small); color: var(--muted); }
+.trading-auto-field select {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 10px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--theme-surface, #fff);
+	color: inherit;
+	font: inherit;
+}
+
+.trading-auto-stats {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+	gap: 10px;
+	padding: 10px 0;
+	border-top: 1px solid var(--line-soft, var(--line));
+	border-bottom: 1px solid var(--line-soft, var(--line));
+}
+.trading-auto-stats div { display: grid; gap: 4px; }
+.trading-auto-stats span { font-size: var(--fs-small); color: var(--muted); }
+.trading-auto-stats strong { font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
+
+.trading-breaker-alert {
+	display: flex;
+	gap: 10px;
+	align-items: flex-start;
+	padding: 10px 12px;
+	border: 1px solid rgba(214, 69, 69, .45);
+	border-radius: 10px;
+	background: rgba(214, 69, 69, .08);
+}
+.trading-breaker-alert svg { color: #c0533f; flex-shrink: 0; margin-top: 2px; }
+.trading-breaker-alert strong { display: block; font-size: var(--fs-small); color: #c0533f; }
+.trading-breaker-alert span { display: block; margin-top: 2px; font-size: var(--fs-small); color: var(--muted); }
+
+.trading-breakers { display: flex; flex-wrap: wrap; gap: 8px; }
+.trading-breaker {
+	display: inline-flex;
+	gap: 6px;
+	align-items: baseline;
+	padding: 4px 10px;
+	border-radius: 999px;
+	border: 1px solid var(--line);
+	font-size: 12px;
+	background: var(--theme-surface-soft, rgba(0, 0, 0, .02));
+}
+.trading-breaker em { font-style: normal; color: var(--muted); }
+.trading-breaker.armed { border-color: rgba(47, 143, 99, .45); }
+.trading-breaker.armed em { color: #2f8f63; }
+.trading-breaker.tripped { border-color: rgba(214, 69, 69, .55); background: rgba(214, 69, 69, .08); }
+.trading-breaker.tripped em { color: #c0533f; }
+/* 未接线的规则要看起来就是"没装弹"，不能与已生效的规则同样醒目 */
+.trading-breaker.inert { opacity: .66; border-style: dashed; }
+
+.trading-auto-last { margin: 0; font-size: var(--fs-small); color: var(--muted); }
+
+/* 交易员日志：一轮一张卡，闸门状态决定它是"跳过"还是"被拦" */
+.trading-cycles { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.trading-cycles > li {
+	display: grid;
+	gap: 8px;
+	padding: 12px 14px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+}
+.trading-cycles > li.failed,
+.trading-cycles > li.blocked { border-left: 3px solid #d64545; }
+.trading-cycles > li.skipped { border-left: 3px solid var(--line); }
+.trading-cycles > li.done { border-left: 3px solid #2f9e6f; }
+.trading-cycles > li.aborted,
+.trading-cycles > li.running { border-left: 3px solid #edc36e; }
+
+.trading-cycle-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.trading-cycle-head strong { font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
+.trading-cycle-head .trading-link { margin-left: auto; }
+
+.trading-cycle-status {
+	padding: 1px 8px;
+	border-radius: 999px;
+	border: 1px solid var(--line);
+	font-size: 11px;
+	color: var(--muted);
+}
+.trading-cycle-status.done { color: #2f8f63; border-color: rgba(47, 143, 99, .5); }
+.trading-cycle-status.blocked,
+.trading-cycle-status.failed { color: #c0533f; border-color: rgba(192, 83, 63, .5); }
+.trading-cycle-status.running { color: var(--theme-blue, #2476d2); border-color: rgba(36, 118, 210, .5); }
+
+.trading-cycle-meta { display: flex; flex-wrap: wrap; gap: 12px; font-size: var(--fs-small); color: var(--muted); font-variant-numeric: tabular-nums; }
+.trading-cycle-reason { margin: 0; font-size: var(--fs-small); color: var(--muted); }
+.trading-cycle-gates { display: flex; flex-wrap: wrap; gap: 6px; }
+.trading-cycle-gates span {
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 999px;
+	border: 1px solid var(--line);
+	color: var(--muted);
+}
+.trading-cycle-gates span.open { border-color: rgba(47, 143, 99, .4); color: #2f8f63; }
+.trading-cycle-gates span.closed { border-color: rgba(192, 83, 63, .45); color: #c0533f; }
+
+/* 一轮回放：五段按时间顺序排列，读起来就是当时的决策链 */
+.trading-replay {
+	display: grid;
+	gap: 10px;
+	margin-top: 4px;
+	padding: 12px 14px;
+	border: 1px dashed var(--line);
+	border-radius: 10px;
+	background: var(--theme-surface-soft, rgba(0, 0, 0, .02));
+}
+.trading-replay-section { display: grid; gap: 4px; }
+.trading-replay-section h3 { margin: 0; font-size: var(--fs-small); color: var(--muted); font-weight: 600; }
+.trading-replay-section p { margin: 0; font-size: var(--fs-small); line-height: var(--lh-reading); }
+.trading-replay-list { margin: 0; padding-left: 18px; display: grid; gap: 2px; font-size: var(--fs-small); }
+.trading-replay-list code { font-size: 11px; color: var(--muted); margin-right: 4px; }
+
+/* 防守线：止损用绿、止盈用红，与 A 股涨跌配色一致（止损=风险线，止盈=目标线） */
+.trading-line {
+	display: inline-block;
+	margin-right: 6px;
+	padding: 1px 6px;
+	border-radius: 6px;
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	border: 1px solid var(--line);
+}
+.trading-line.stop { color: #2f8f63; border-color: rgba(47, 143, 99, .45); background: rgba(47, 143, 99, .08); }
+.trading-line.take { color: #c0533f; border-color: rgba(192, 83, 63, .45); background: rgba(214, 69, 69, .07); }
+.trading-line.none { color: var(--muted); border-style: dashed; }
+
+.trading-protection-row > td { background: var(--theme-surface-soft, rgba(0, 0, 0, .02)); }
+.trading-protection-form {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	align-items: center;
+	font-size: var(--fs-small);
+}
+.trading-protection-form label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+.trading-protection-form input {
+	width: 84px;
+	padding: 5px 8px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: var(--theme-surface, #fff);
+	color: inherit;
+	font: inherit;
+	font-variant-numeric: tabular-nums;
+}
+.trading-protection-form .trading-primary {
+	padding: 5px 12px;
+	border: 1px solid transparent;
+	border-radius: 8px;
+	background: var(--theme-blue, #2476d2);
+	color: #fff;
+	font: inherit;
+	cursor: pointer;
+}
+
+/* 复盘：数字与经验并列，先把"错在哪"摆出来，再谈结论 */
+.trading-review-stats {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+	gap: 10px;
+}
+.trading-review-stats div {
+	display: grid;
+	gap: 3px;
+	padding: 9px 11px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--theme-surface-soft, rgba(0, 0, 0, .02));
+}
+.trading-review-stats span { font-size: 11px; color: var(--muted); }
+.trading-review-stats strong { font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
+
+.trading-review-narrative { color: var(--muted); }
+
+.trading-lessons { display: grid; gap: 8px; }
+.trading-lessons h3 { margin: 0; font-size: var(--fs-small); color: var(--muted); font-weight: 600; }
+.trading-lessons ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.trading-lessons li {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: baseline;
+	padding: 7px 9px;
+	border: 1px solid var(--line-soft, var(--line));
+	border-radius: 8px;
+	font-size: var(--fs-small);
+	line-height: var(--lh-reading);
+	background: var(--theme-surface, #fff);
+}
+/* 样本达标的结论用左侧实线标出，样本不足的保持虚线：
+   让人一眼看出哪条能当结论、哪条只是"目前看到的现象"。 */
+.trading-lessons li { border-left: 2px dashed var(--line); }
+.trading-lessons li.reliable { border-left: 2px solid #2f9e6f; }
+
+.trading-closed-table td span, .trading-closed-table td .trading-subtle { display: block; font-size: 11px; color: var(--muted); }
+
+/* ── 业绩归因 ────────────────────────────────────────────────
+   这一块只回答"到目前为止赚没赚、靠什么赚"。
+   数字全部来自后端聚合，这里不做任何再计算，避免两个页面给出不同的胜率。 */
+.trading-perf-summary { margin-bottom: 4px; }
+
+.trading-perf-facts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px 20px;
+	font-size: var(--fs-small);
+	color: var(--muted);
+}
+
+.trading-perf-exits { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.trading-perf-exits span {
+	padding: 3px 10px;
+	border-radius: 999px;
+	background: var(--theme-surface-soft, #f2f6fa);
+	font-size: var(--fs-small);
+	color: var(--muted);
+}
+
+.trading-perf-curve {
+	display: grid;
+	gap: 8px;
+	padding: 12px 14px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+}
+
+.trading-perf-curve-head { display: flex; justify-content: space-between; font-size: var(--fs-small); }
+.trading-perf-curve-head strong { font-size: var(--fs-small); font-weight: 600; }
+.trading-perf-curve-head span { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.trading-perf-bars {
+	display: flex;
+	align-items: flex-end;
+	gap: 5px;
+	height: 88px;
+	overflow-x: auto;
+	padding-bottom: 2px;
+}
+
+.trading-perf-bar {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 4px;
+	min-width: 26px;
+	height: 100%;
+}
+
+.trading-perf-bar i {
+	width: 100%;
+	max-width: 22px;
+	border-radius: 3px 3px 0 0;
+	background: currentColor;
+	opacity: .8;
+}
+
+.trading-perf-bar.up { color: var(--up, #d64545); }
+.trading-perf-bar.down { color: var(--down, #2f9e6f); }
+.trading-perf-bar small { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+.trading-perf-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.trading-perf-groups > div { min-width: 0; }
+.trading-perf-groups strong { font-size: var(--fs-small); font-weight: 600; }
+.trading-perf-groups ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+
+.trading-perf-groups li {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	font-size: var(--fs-small);
+	padding-bottom: 6px;
+	border-bottom: 1px dashed var(--line);
+}
+
+.trading-perf-groups li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trading-perf-groups li em { font-style: normal; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.trading-perf-groups li em.up { color: var(--up, #d64545); }
+.trading-perf-groups li em.down { color: var(--down, #2f9e6f); }
+
+@media (max-width: 900px) {
+	.trading-perf-groups { grid-template-columns: 1fr; }
+}
+
+/* ── 运行健康条 ──────────────────────────────────────────────
+   无人值守时这一条是唯一的"要不要介入"信号。
+   三种状态的边框颜色必须一眼可分，所以用整条左边框而不是小圆点。 */
+.trading-health {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px 14px;
+	padding: 10px 14px;
+	border: 1px solid var(--line);
+	border-left-width: 4px;
+	border-radius: 10px;
+	background: var(--theme-surface-soft, #f7fafc);
+	font-size: var(--fs-small);
+}
+
+.trading-health.healthy { border-left-color: var(--down, #2f9e6f); }
+.trading-health.warning { border-left-color: #d98324; }
+.trading-health.critical { border-left-color: var(--up, #d64545); }
+.trading-health.unknown { border-left-color: var(--line); color: var(--muted); }
+
+.trading-health strong { font-size: var(--fs-small); font-weight: 600; }
+.trading-health.critical strong { color: var(--up, #d64545); }
+.trading-health.warning strong { color: #b9711c; }
+.trading-health.healthy strong { color: var(--down, #2f9e6f); }
+
+.trading-health-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.trading-health-issues { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 240px; }
+
+.trading-health-issues span {
+	padding: 2px 9px;
+	border-radius: 999px;
+	font-size: 11px;
+	line-height: 1.6;
+	background: rgba(0, 0, 0, .05);
+}
+
+.trading-health-issues .critical { background: rgba(214, 69, 69, .12); color: var(--up, #d64545); }
+.trading-health-issues .warning { background: rgba(217, 131, 36, .14); color: #b9711c; }
+.trading-health-issues .trading-health-ok { background: transparent; color: var(--muted); padding-left: 0; }
+
+/* ── 运行事件流 ──────────────────────────────────────────────
+   事件是"系统自己的决定"，排版按时间对齐，扫一眼就能看出密度。 */
+.trading-events { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+
+.trading-events li {
+	display: grid;
+	grid-template-columns: 132px 44px 1fr auto;
+	align-items: baseline;
+	gap: 10px;
+	padding: 7px 10px;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	font-size: var(--fs-small);
+}
+
+.trading-events li.critical { border-color: rgba(214, 69, 69, .35); background: rgba(214, 69, 69, .05); }
+.trading-events li.warning { border-color: rgba(217, 131, 36, .3); }
+
+.trading-event-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.trading-event-severity {
+	text-align: center;
+	font-size: 11px;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: rgba(0, 0, 0, .06);
+	color: var(--muted);
+}
+
+.trading-event-severity.critical { background: rgba(214, 69, 69, .14); color: var(--up, #d64545); }
+.trading-event-severity.warning { background: rgba(217, 131, 36, .16); color: #b9711c; }
+
+.trading-event-message { overflow-wrap: anywhere; }
+.trading-event-kind { color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+@media (max-width: 900px) {
+	.trading-events li { grid-template-columns: 1fr; gap: 3px; }
+}
+
+/* ── 调研回放 ────────────────────────────────────────────────
+   默认折叠是一条硬规则：三步查询的原文能占满整屏，会把订单表挤下去。
+   但折叠状态必须露出结论——"要点开才知道它想了什么"等于没给。 */
+.trading-research {
+	margin: 10px 0;
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--theme-accent, #534AB7);
+	border-radius: 10px;
+	background: var(--theme-surface-soft, #f7f8fc);
+	padding: 10px 14px;
+}
+
+.trading-research.degraded { border-left-color: #d98324; }
+
+.trading-research-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	background: none;
+	border: 0;
+	padding: 0;
+	cursor: pointer;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+}
+
+.trading-research-head strong { font-size: var(--fs-small); font-weight: 600; }
+.trading-research-meta { color: var(--muted); font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
+.trading-research-head svg:last-child { margin-left: auto; color: var(--muted); }
+
+.trading-research-conclusion {
+	margin: 8px 0 0;
+	font-size: var(--fs-small);
+	line-height: 1.6;
+	color: var(--text);
+}
+
+.trading-research.open .trading-research-conclusion { margin-bottom: 4px; }
+
+.trading-research-steps {
+	list-style: none;
+	margin: 10px 0 0;
+	padding: 0;
+	display: grid;
+	gap: 10px;
+	counter-reset: step;
+}
+
+.trading-research-steps li {
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: var(--theme-surface, #fff);
+	padding: 9px 12px;
+}
+
+.trading-research-steps li.failed { border-color: rgba(217, 131, 36, .45); }
+
+.trading-research-steps header {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	font-size: 11px;
+	color: var(--muted);
+}
+
+.trading-research-steps header .index { font-weight: 600; color: var(--text); }
+.trading-research-steps header code {
+	background: rgba(83, 74, 183, .1);
+	color: #534AB7;
+	padding: 1px 7px;
+	border-radius: 5px;
+	font-size: 11px;
+}
+.trading-research-steps header .args { font-family: var(--font-mono, monospace); overflow-wrap: anywhere; }
+.trading-research-steps header .latency,
+.trading-research-steps header .rows { font-variant-numeric: tabular-nums; }
+
+.trading-research-steps .thought {
+	margin: 7px 0 0;
+	font-size: var(--fs-small);
+	color: var(--muted);
+	font-style: italic;
+}
+
+.trading-research-steps pre {
+	margin: 7px 0 0;
+	padding: 8px 10px;
+	background: rgba(0, 0, 0, .028);
+	border-radius: 6px;
+	font-size: 11.5px;
+	line-height: 1.65;
+	font-family: var(--font-mono, monospace);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 240px;
+	overflow-y: auto;
+}
+
+.trading-research-steps .error { margin: 7px 0 0; font-size: var(--fs-small); color: #b9711c; }
+.trading-research-note { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
+
+/* ── 情景记忆 ────────────────────────────────────────────────
+   一条记忆 = 一次交易的现场。排版按"谁、什么时候、什么环境、结果"
+   四段横向对齐，扫一眼就能比出哪次亏得冤。 */
+.trading-memories { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+
+.trading-memories li {
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--line);
+	border-radius: 9px;
+	padding: 9px 12px;
+}
+
+.trading-memories li.win { border-left-color: var(--up, #d64545); }
+.trading-memories li.loss { border-left-color: var(--down, #2f9e6f); }
+.trading-memories li.flat { border-left-color: var(--muted); }
+
+.trading-memory-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 8px 12px;
+	font-size: var(--fs-small);
+}
+
+.trading-memory-head strong { font-weight: 600; }
+.trading-memory-head .meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+.trading-memory-head em { margin-left: auto; font-style: normal; font-variant-numeric: tabular-nums; font-weight: 500; }
+.trading-memory-head em.up { color: var(--up, #d64545); }
+.trading-memory-head em.down { color: var(--down, #2f9e6f); }
+
+.trading-memory-outcome {
+	font-size: 11px;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: rgba(0, 0, 0, .05);
+	color: var(--muted);
+}
+.trading-memory-outcome.win { background: rgba(214, 69, 69, .12); color: var(--up, #d64545); }
+.trading-memory-outcome.loss { background: rgba(47, 158, 111, .12); color: var(--down, #2f9e6f); }
+
+.trading-memory-thesis {
+	margin: 6px 0 0;
+	font-size: var(--fs-small);
+	color: var(--muted);
+	line-height: 1.6;
+}
+
+.trading-memory-lesson {
+	margin: 5px 0 0;
+	font-size: var(--fs-small);
+	line-height: 1.6;
+}
+
+.trading-memory-giveback {
+	margin: 4px 0 0;
+	font-size: 11.5px;
+	color: #b9711c;
+}

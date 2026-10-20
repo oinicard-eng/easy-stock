@@ -18,6 +18,7 @@ import (
 	"easy-stock/backend/internal/strategy/inflection"
 	"easy-stock/backend/internal/themeindex"
 	"easy-stock/backend/internal/themelibrary"
+	"easy-stock/backend/internal/trading"
 )
 
 type RealtimeProvider interface {
@@ -216,18 +217,21 @@ type Config struct {
 	ReviewHTTP               *http.Client
 	ReviewStore              *review.Store
 	PortfolioStore           *portfolioinspection.Store
-	MarketEmotionStore       *marketemotion.Store
-	ReviewImporter           ReviewImporter
-	SettingsPath             string
-	SettingsStore            *appsettings.Store
-	ReviewAutomation         *review.Automation
-	ReviewCalendar           review.TradingCalendar
-	RemoteDailyReviewURL     string
-	RemoteDailySync          *review.RemoteDailySync
-	AgentGateway             agent.Gateway
-	MasteryLibrary           *methodology.Library
-	Logger                   *log.Logger
-	StrictPersistence        bool
+	// TradingDBPath 与 TradingStore 对应模拟盘账本；交易智能体只写本地账本，不触达券商。
+	TradingDBPath        string
+	TradingStore         *trading.Store
+	MarketEmotionStore   *marketemotion.Store
+	ReviewImporter       ReviewImporter
+	SettingsPath         string
+	SettingsStore        *appsettings.Store
+	ReviewAutomation     *review.Automation
+	ReviewCalendar       review.TradingCalendar
+	RemoteDailyReviewURL string
+	RemoteDailySync      *review.RemoteDailySync
+	AgentGateway         agent.Gateway
+	MasteryLibrary       *methodology.Library
+	Logger               *log.Logger
+	StrictPersistence    bool
 }
 
 func normalizeConfig(value any) Config {

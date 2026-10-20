@@ -25,6 +25,7 @@ func main() {
 	reviewDBPath := os.Getenv("A_STOCK_REVIEW_DB")
 	portfolioDBPath := os.Getenv("A_STOCK_PORTFOLIO_DB")
 	stockResearchDBPath := os.Getenv("A_STOCK_RESEARCH_DB")
+	tradingDBPath := os.Getenv("A_STOCK_TRADING_DB")
 	marketEmotionDBPath := os.Getenv("A_STOCK_MARKET_EMOTION_DB")
 	themeRadarDBPath := os.Getenv("A_STOCK_THEME_RADAR_DB")
 	themeLibraryDBPath := os.Getenv("A_STOCK_THEME_LIBRARY_DB")
@@ -53,6 +54,9 @@ func main() {
 	}
 	if stockResearchDBPath == "" {
 		stockResearchDBPath = dataPath(dataDir, "stock-research.db")
+	}
+	if tradingDBPath == "" {
+		tradingDBPath = dataPath(dataDir, "trading.db")
 	}
 	if marketEmotionDBPath == "" {
 		marketEmotionDBPath = dataPath(dataDir, "market-emotion.db")
@@ -113,6 +117,7 @@ func main() {
 		ReviewDBPath:             reviewDBPath,
 		PortfolioDBPath:          portfolioDBPath,
 		StockResearchDBPath:      stockResearchDBPath,
+		TradingDBPath:            tradingDBPath,
 		RemoteDailyReviewURL:     os.Getenv("A_STOCK_DAILY_REVIEW_BASE_URL"),
 		MarketEmotionDBPath:      marketEmotionDBPath,
 		ThemeRadarDBPath:         themeRadarDBPath,
@@ -140,6 +145,7 @@ func main() {
 	go server.RunSectorFlowSampler(ctx)
 	go server.RunMasteryScheduler(ctx)
 	go server.RunPortfolioScheduler(ctx)
+	go server.RunTradingAutopilot(ctx)
 	go server.RunCockpitPatrol(ctx)
 	go server.RunThemeLibraryDailyRefresh(ctx)
 	httpServer := &http.Server{Addr: addr, Handler: server}
