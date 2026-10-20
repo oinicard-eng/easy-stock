@@ -2,9 +2,11 @@ package trading
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"easy-stock/backend/internal/foundation"
+	"easy-stock/backend/internal/trading/policy"
 )
 
 // 沙盘的验收标准：同一份输入、只换阈值，差异必须逐笔可解释；
@@ -37,6 +39,11 @@ func TestSandboxReplaysPlanWithAnotherProfile(t *testing.T) {
 	}
 	if len(result.Changes) != 1 || result.Changes[0].Kind != "added" {
 		t.Fatalf("应记录一笔 added 差异：%+v", result.Changes)
+	}
+	// 差异必须自带原因：只说"从被拒变成可买"而不说被什么拒的，
+	// 用户还得自己回去翻裁决。
+	if strings.TrimSpace(result.Changes[0].Reason) == "" {
+		t.Fatalf("差异缺少原因：%+v", result.Changes[0])
 	}
 
 	// 最关键的一条：沙盘不能改动真实计划。
@@ -72,5 +79,35 @@ func TestSandboxSameProfileIsIdentity(t *testing.T) {
 	}
 	if result.Original.Accepted != result.Replayed.Accepted {
 		t.Fatalf("受理数应一致：%d vs %d", result.Original.Accepted, result.Replayed.Accepted)
+	}
+}
+
+// 股数变化的原因必须写出来。resized 是最容易"看起来像系统算错"的一类差异：
+// 同一份建议、同样的价格，回放后少了一百股，不解释就只能靠人猜。
+func TestDiffSandboxExplainsResize(t *testing.T) {
+	original := []Order{{
+		Symbol: "600000.SH", Name: "浦发银行", Side: SideBuy, Status: OrderStatusPending,
+		Quantity: 300, TargetWeightPercent: 4,
+	}}
+	replayed := []Order{{
+		Symbol: "600000.SH", Name: "浦发银行", Side: SideBuy, Status: OrderStatusPending,
+		Quantity: 200, TargetWeightPercent: 3.2,
+	}}
+	verdicts := []policy.Verdict{{
+		Code: policy.CodeSizingConfidence, Level: policy.LevelAdjust, Scope: policy.ScopeOrder,
+		Symbol: "600000.SH", Message: "置信度 0.60，目标权重 4.00% → 3.20%",
+	}}
+	changes := diffSandbox(original, replayed, verdicts)
+	if len(changes) != 1 || changes[0].Kind != "resized" {
+		t.Fatalf("应记录一笔 resized 差异：%+v", changes)
+	}
+	if !strings.Contains(changes[0].Reason, "sizing.confidence") {
+		t.Fatalf("resized 差异应引用定价裁决，实际 %q", changes[0].Reason)
+	}
+
+	// 没有裁决时也要给出可读原因，不能留空。
+	bare := diffSandbox(original, replayed, nil)
+	if len(bare) != 1 || !strings.Contains(bare[0].Reason, "4.00%") {
+		t.Fatalf("无裁决时应回落到权重变化说明，实际 %+v", bare)
 	}
 }

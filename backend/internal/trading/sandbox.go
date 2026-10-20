@@ -168,12 +168,20 @@ func diffSandbox(original, replayed []Order, replayedVerdicts []policy.Verdict) 
 	}
 	before := index(original)
 	after := index(replayed)
-	reasons := map[string]string{}
+	blocks := map[string]string{}
+	adjusts := map[string]string{}
 	for _, verdict := range replayedVerdicts {
-		if verdict.Level == policy.LevelBlock && verdict.Symbol != "" {
-			if _, ok := reasons[verdict.Symbol]; !ok {
-				reasons[verdict.Symbol] = verdict.Code + "：" + verdict.Message
-			}
+		if verdict.Symbol == "" {
+			continue
+		}
+		target := adjusts
+		if verdict.Level == policy.LevelBlock {
+			target = blocks
+		} else if verdict.Level != policy.LevelAdjust {
+			continue
+		}
+		if _, ok := target[verdict.Symbol]; !ok {
+			target[verdict.Symbol] = verdict.Code + "：" + verdict.Message
 		}
 	}
 	symbols := make([]string, 0, len(before)+len(after))
@@ -213,13 +221,23 @@ func diffSandbox(original, replayed []Order, replayedVerdicts []policy.Verdict) 
 			continue
 		}
 		name := firstNonEmpty(newOrder.Name, oldOrder.Name)
+		// 差异必须自带原因，否则用户只能自己猜"为什么少了 100 股"。
+		// resized 优先用调整类裁决（定价/资金缩减），removed 优先用拦截裁决；
+		// 两边都取不到时，至少把权重变化写出来。
+		var reason string
+		if kind == "resized" {
+			reason = firstNonEmpty(adjusts[symbol], blocks[symbol],
+				fmt.Sprintf("重算后目标权重 %.2f%% → %.2f%%", oldOrder.TargetWeightPercent, newOrder.TargetWeightPercent))
+		} else {
+			reason = firstNonEmpty(blocks[symbol], adjusts[symbol])
+		}
 		changes = append(changes, SandboxChange{
 			Symbol:   symbol,
 			Name:     name,
 			Kind:     kind,
 			Original: describeSandboxOrder(oldOrder, hadOld),
 			Replayed: describeSandboxOrder(newOrder, hasNew),
-			Reason:   reasons[symbol],
+			Reason:   reason,
 		})
 	}
 	return changes
