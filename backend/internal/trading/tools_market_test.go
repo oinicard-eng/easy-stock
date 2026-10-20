@@ -222,6 +222,49 @@ func TestGetMarketContextFlagsUnevaluatedMarket(t *testing.T) {
 	}
 }
 
+type stubEmotion struct {
+	view EmotionView
+	err  error
+}
+
+func (s stubEmotion) LatestEmotion(context.Context) (EmotionView, error) {
+	return s.view, s.err
+}
+
+func TestGetMarketContextIncludesEmotionPhase(t *testing.T) {
+	toolbox := &Toolbox{
+		snapshot: Snapshot{Market: testMarketView()},
+		emotion: stubEmotion{view: EmotionView{
+			TradeDate: "2026-10-20", Phase: "退潮", Score: 38, Confidence: "中",
+		}},
+	}
+	outcome, err := toolbox.Call(context.Background(), "get_market_context", nil)
+	if err != nil {
+		t.Fatalf("情绪周期查询不应失败：%v", err)
+	}
+	for _, want := range []string{"情绪周期", "退潮", "2026-10-20"} {
+		if !strings.Contains(outcome.Text, want) {
+			t.Fatalf("大盘文本缺少 %q：%s", want, outcome.Text)
+		}
+	}
+	// 情绪阶段容易被误读成"这只票能不能追"，边界必须写在输出里。
+	if !strings.Contains(outcome.Text, "不能替代对个股的判断") {
+		t.Fatalf("应说明情绪阶段的适用边界：%s", outcome.Text)
+	}
+}
+
+func TestGetMarketContextReportsEmptyEmotion(t *testing.T) {
+	// 空库（当日尚未生成）不等于"情绪中性"，必须明说，否则模型会把缺失当默认值。
+	toolbox := &Toolbox{snapshot: Snapshot{Market: testMarketView()}, emotion: stubEmotion{}}
+	outcome, err := toolbox.Call(context.Background(), "get_market_context", nil)
+	if err != nil {
+		t.Fatalf("空情绪数据不应让工具失败：%v", err)
+	}
+	if !strings.Contains(outcome.Text, "返回空") {
+		t.Fatalf("应提示情绪数据为空：%s", outcome.Text)
+	}
+}
+
 func TestGetMarginBalanceComputesRangeChange(t *testing.T) {
 	toolbox := &Toolbox{marketIntel: stubMarketIntel{margin: []foundation.MarketMarginPoint{
 		{TradeDate: "2026-10-17", MarginBalance: 1.5e12, MarginBalanceChange: 1e10, FinancingNetBuyAmount: 8e9},

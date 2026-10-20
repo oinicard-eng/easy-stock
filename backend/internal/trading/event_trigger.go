@@ -17,6 +17,7 @@ package trading
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"easy-stock/backend/internal/foundation"
@@ -29,8 +30,9 @@ const (
 	// eventMaxPerDay 是事件轮次的每日上限。
 	eventMaxPerDay = 6
 	// eventSingleDropPercent 是单票日内跌幅阈值（相对昨收）。
-	// 4% 在 A 股是"明显异动"而不是"正常波动"，低于它触发会变成噪音。
-	eventSingleDropPercent = 4.0
+	// 5% 在 A 股是"明显异动"而不是"正常波动"：日波动 4% 在高波动票上很常见，
+	// 拿它当触发线会让事件通道退化成"每天开几次会"。
+	eventSingleDropPercent = 5.0
 	// eventSingleWeightPercent 是被考虑的单票权重下限。
 	// 0.5% 的仓位跌 8% 对账户影响不到 0.05%，不值得为它调一次模型。
 	eventSingleWeightPercent = 3.0
@@ -40,6 +42,17 @@ const (
 	// eventPortfolioWindow 是组合跌幅的观察窗口。
 	// 只在窗口内比较：拿上午 10 点的权益和下午 2 点比，得到的必然是大跌。
 	eventPortfolioWindow = 15 * time.Minute
+	// eventSectorFlowInterval 是板块资金流的取数间隔。
+	// 它是外部接口，不能跟着 15 秒的 tick 打：15 秒一次等于一天几千次请求，
+	// 而资金流本身是分钟级更新，取那么勤也拿不到新东西。
+	eventSectorFlowInterval = 5 * time.Minute
+	// eventSectorFlowNegativeRatio 是"资金流转负"的判定线：主力净流入占比低于 -1%。
+	// 不用"净额为负"直接判：净额为负但占比只有 -0.1% 的板块，
+	// 属于正常抖动，拿它触发一次模型调用是纯浪费。
+	eventSectorFlowNegativeRatio = -1.0
+	// eventSectorFlowDimensionLimit 是每次取数的板块条数。
+	// 60 条足够覆盖主力资金流排名靠前的板块，再多也匹配不到持仓所在的行业。
+	eventSectorFlowDimensionLimit = 60
 )
 
 // eventWatch 是事件通道的内存状态。
@@ -54,6 +67,11 @@ type eventWatch struct {
 	// equity / equityAt 是组合权益的观察基线。
 	equity   float64
 	equityAt time.Time
+	// sectorFlow / sectorFlowAt 缓存板块资金流（名称 → 主力净占比）。
+	// 缓存的意义不只是省请求：它还是"板块资金流是否转负"的比较基准，
+	// 每次都取最新值的话，只能看到"现在为负"，看不到"刚刚转负"。
+	sectorFlow   map[string]float64
+	sectorFlowAt time.Time
 }
 
 // eventTriggered 判断此刻是否该发起一轮事件循环，返回触发原因。
@@ -148,7 +166,115 @@ func (a *Autopilot) eventTriggered(ctx context.Context, accountID string, now ti
 		return fmt.Sprintf("%s（权重 %.2f%%）日内跌 %.2f%% 至 %.2f，发起临时轮次",
 			position.Symbol, weight, drop, current), true
 	}
+
+	// 3. 板块级：价格还没跌，但主力资金已经在撤。
+	// 这一类早于价格信号：等板块指数跌下去再反应，持仓已经跟着跌了一截。
+	if reason, ok := a.sectorFlowNegative(ctx, account, positions, now); ok {
+		a.markEventFired(now)
+		return reason, true
+	}
 	return "", false
+}
+
+// sectorFlowNegative 检查有没有持仓所在板块的主力资金转负。
+//
+// 只对权重够大的持仓判断：0.5% 的仓位即使板块崩了，对账户的影响也不值得
+// 叫一次模型。匹配用包含关系（"银行" ↔ "银行Ⅱ"），因为持仓存的是行业大类，
+// 而资金流给的是板块全名，两者很少逐字相同。命中多条时取最差的那条：
+// 一个板块同时命中几个概念时，挑最好看的来自我安慰是最没意义的做法。
+func (a *Autopilot) sectorFlowNegative(ctx context.Context, account Account, positions []Position, now time.Time) (string, bool) {
+	provider := a.service.SectorFlow()
+	if provider == nil {
+		return "", false
+	}
+	a.mu.Lock()
+	// 这里也要兜底初始化：本函数可能先于 eventTriggered 被调用（测试、
+	// 或将来别处的探测），而 nil map 写入会直接 panic。
+	if a.watch.fired == nil {
+		a.watch.fired = map[string]string{}
+	}
+	flows, fetchedAt := a.watch.sectorFlow, a.watch.sectorFlowAt
+	a.mu.Unlock()
+	if len(flows) == 0 || now.Sub(fetchedAt) >= eventSectorFlowInterval {
+		flows = a.fetchSectorFlow(ctx, provider)
+		a.mu.Lock()
+		a.watch.sectorFlow = flows
+		a.watch.sectorFlowAt = now
+		a.mu.Unlock()
+	}
+	if len(flows) == 0 {
+		return "", false
+	}
+
+	day := TradingDay(now)
+	for _, position := range positions {
+		if position.Quantity <= 0 {
+			continue
+		}
+		if position.WeightPercent(account.Equity) < eventSingleWeightPercent {
+			continue
+		}
+		sector := strings.TrimSpace(position.Sector)
+		if sector == "" {
+			// 没有行业信息就不猜。用代码前缀或名称去猜板块，
+			// 猜错的代价是发一轮"因为某个不相干板块跌了"的临时轮次。
+			continue
+		}
+		ratio, ok := matchSectorFlow(flows, sector)
+		if !ok || ratio > eventSectorFlowNegativeRatio {
+			continue
+		}
+		key := "flow|" + day + "|" + sector
+		a.mu.Lock()
+		already := a.watch.fired[key] != ""
+		if !already {
+			a.watch.fired[key] = day
+		}
+		a.mu.Unlock()
+		if already {
+			continue
+		}
+		return fmt.Sprintf("%s 所属板块「%s」主力资金净占比 %.2f%%（转负），发起临时轮次",
+			position.Symbol, sector, ratio), true
+	}
+	return "", false
+}
+
+// fetchSectorFlow 取行业与概念两个维度的资金流，合成"名称 → 主力净占比"。
+// 任一维度失败就只用另一个维度的结果：缺一半数据也比完全没有好，
+// 而两个都失败时返回空表，调用方会直接放弃判断。
+func (a *Autopilot) fetchSectorFlow(ctx context.Context, provider SectorFlowProvider) map[string]float64 {
+	flows := make(map[string]float64, eventSectorFlowDimensionLimit*2)
+	for _, dimension := range []string{"industry", "concept"} {
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		rows, _, err := provider.SectorFlowRanking(callCtx, dimension, eventSectorFlowDimensionLimit)
+		cancel()
+		if err != nil {
+			a.logf("event=autopilot_sector_flow_failed dimension=%s err=%v", dimension, err)
+			continue
+		}
+		for _, row := range rows {
+			if row.Name == "" {
+				continue
+			}
+			flows[row.Name] = row.MainNetInflowRatio
+		}
+	}
+	return flows
+}
+
+// matchSectorFlow 按包含关系匹配板块名，返回命中项里最差（最低）的净占比。
+func matchSectorFlow(flows map[string]float64, sector string) (float64, bool) {
+	worst, found := 0.0, false
+	for name, ratio := range flows {
+		if name != sector && !strings.Contains(name, sector) && !strings.Contains(sector, name) {
+			continue
+		}
+		if !found || ratio < worst {
+			worst, found = ratio, true
+		}
+	}
+	return worst, found
 }
 
 // markEventFired 记账：次数 +1、记录时刻。间隔判定依赖 lastAt，

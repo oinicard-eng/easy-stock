@@ -28,6 +28,26 @@ type MarketIntelProvider interface {
 	Announcements(ctx context.Context, query, symbol, category string, limit int) ([]foundation.MarketResearchItem, foundation.SourceMeta, error)
 }
 
+// EmotionView 是市场情绪周期的最小视图。
+//
+// 单独定义而不是直接引用 marketemotion.Snapshot：交易侧只需要"哪个阶段、
+// 有多强、数据是哪天的"，把整张情绪快照引进来会让交易域依赖一个人气模块，
+// 以后改情绪模型就会牵动交易编译。
+type EmotionView struct {
+	TradeDate  string
+	Phase      string
+	Score      float64
+	Confidence string
+	UpdatedAt  time.Time
+}
+
+// EmotionProvider 提供最近一个交易日的情绪周期。
+// 与其余数据源一样是可选的：没有它时工具会明说"未配置"，
+// 而不是让模型以为"情绪周期是中性"。
+type EmotionProvider interface {
+	LatestEmotion(ctx context.Context) (EmotionView, error)
+}
+
 // NewsSearchProvider 是新闻能力：既要有全市场最新，也要能按标的检索。
 // 只有全市场时，模型问"这只票为什么涨"会得到一堆与它无关的宏观新闻。
 type NewsSearchProvider interface {
@@ -73,7 +93,7 @@ func marketIntelSpecs() []ToolSpec {
 		},
 		{
 			Name:        "get_market_context",
-			Description: "大盘环境：主要指数涨跌、市场状态与风险预算、涨跌家数与涨跌停数、中位涨幅、全市场成交额。用于判断现在该不该进攻。",
+			Description: "大盘环境：主要指数涨跌、市场状态与风险预算、涨跌家数与涨跌停数、中位涨幅、全市场成交额、情绪周期阶段。用于判断现在该不该进攻。",
 			Params:      []ToolParam{},
 		},
 		{
@@ -338,8 +358,26 @@ func (t *Toolbox) getMarketContext(ctx context.Context, _ map[string]any) (ToolO
 			fmt.Fprintf(&builder, "  说明：%s\n", note)
 		}
 	}
+	// 情绪周期与指数涨跌是两个维度：指数可能微涨，而人气已经在退潮。
+	// 只在有数据源时输出；没有就留空，让下面的"都没配置"分支统一报错，
+	// 而不是在这里写一句"未配置"、掩盖了"确实什么都没有"的处境。
+	if t.emotion != nil {
+		callCtx, cancel := context.WithTimeout(ctx, toolCallTimeout)
+		view, err := t.emotion.LatestEmotion(callCtx)
+		cancel()
+		switch {
+		case err != nil:
+			fmt.Fprintf(&builder, "情绪周期获取失败：%v\n", err)
+		case strings.TrimSpace(view.Phase) == "":
+			builder.WriteString("情绪周期：数据源返回空（当日可能尚未生成），不要据此判断市场冷热\n")
+		default:
+			fmt.Fprintf(&builder, "情绪周期：%s（情绪分 %.0f，置信度 %s，数据日 %s）\n",
+				view.Phase, view.Score, firstNonEmpty(view.Confidence, "未知"), firstNonEmpty(view.TradeDate, "未知"))
+			builder.WriteString("  阶段描述的是全市场人气，不能替代对个股的判断：人气高位不等于这只票还能追。\n")
+		}
+	}
 	if builder.Len() == 0 {
-		return ToolOutcome{}, fmt.Errorf("大盘数据源未配置，且本轮没有市场认知结果，无法提供大盘环境")
+		return ToolOutcome{}, fmt.Errorf("大盘与情绪数据源均未配置，且本轮没有市场认知结果，无法提供大盘环境")
 	}
 	return ToolOutcome{Text: clipToolText(builder.String()), Data: market, Rows: 1}, nil
 }

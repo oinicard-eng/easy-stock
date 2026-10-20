@@ -98,15 +98,35 @@ func TestConfidenceFactorOnlyCutsLowValues(t *testing.T) {
 		factor float64
 	}{
 		{0, 1}, // 未填，不罚
-		{0.3, 0.7},
-		{0.5, 0.9},
-		{0.62, 1}, // 表格里的默认区间，不该被打折
-		{0.9, 1},
+		{0.3, 0.65},
+		{0.5, 0.75},
+		{0.62, 0.81},
+		{0.9, 0.95},
+		{1, 1},
 	}
 	for _, item := range cases {
 		factor, _ := confidenceFactor(item.value)
 		if factor != item.factor {
 			t.Fatalf("置信度 %.2f 的系数应为 %.2f，实际 %.2f", item.value, item.factor, factor)
+		}
+	}
+}
+
+func TestATRSizingFactorShrinksOnlyHighVolatility(t *testing.T) {
+	cases := []struct {
+		atrPercent float64
+		factor     float64
+	}{
+		{0, 1},   // 没有数据，不调整
+		{1.5, 1}, // 低波动不加仓：加仓等于系统替模型放大杠杆
+		{2.5, 1}, // 基准
+		{3.33, 0.75},
+		{8, 0.55}, // 夹在下限，不再继续缩
+	}
+	for _, item := range cases {
+		factor, _ := atrSizingFactor(item.atrPercent)
+		if factor != item.factor {
+			t.Fatalf("ATR %.2f%% 的系数应为 %.2f，实际 %.2f", item.atrPercent, item.factor, factor)
 		}
 	}
 }

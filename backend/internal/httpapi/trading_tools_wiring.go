@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"easy-stock/backend/internal/foundation"
+	"easy-stock/backend/internal/marketemotion"
 	"easy-stock/backend/internal/trading"
 )
 
@@ -54,6 +55,46 @@ func (a tradingNewsAdapter) SearchStockNews(ctx context.Context, symbol, query s
 		return nil, fmt.Errorf("个股新闻检索源未配置")
 	}
 	return a.search.SearchStockNews(ctx, symbol, query, limit)
+}
+
+// tradingEmotionAdapter 用情绪库的最近一条快照回答"市场人气现在在哪个阶段"。
+//
+// 只取一条：情绪周期是日频量，历史序列对"现在该不该进攻"没有增量信息，
+// 多读只会让一次工具调用多扫几十行。
+type tradingEmotionAdapter struct {
+	store *marketemotion.Store
+}
+
+func (a tradingEmotionAdapter) LatestEmotion(ctx context.Context) (trading.EmotionView, error) {
+	if a.store == nil {
+		return trading.EmotionView{}, fmt.Errorf("情绪库未初始化")
+	}
+	snapshots, err := a.store.List(ctx, 1)
+	if err != nil {
+		return trading.EmotionView{}, err
+	}
+	if len(snapshots) == 0 {
+		// 空库不是错误：新部署或当日尚未生成。让工具输出"返回空"，
+		// 比报错更能让模型区分"没有数据"与"数据源坏了"。
+		return trading.EmotionView{}, nil
+	}
+	latest := snapshots[0]
+	return trading.EmotionView{
+		TradeDate:  latest.TradeDate,
+		Phase:      latest.Phase,
+		Score:      latest.EmotionScore,
+		Confidence: latest.Confidence,
+		UpdatedAt:  latest.UpdatedAt,
+	}, nil
+}
+
+// newTradingEmotionAdapter 在情绪库未配置时返回 nil，
+// 让交易侧保持"没有情绪数据源"，而不是拿到一个永远返回错误的适配器。
+func newTradingEmotionAdapter(store *marketemotion.Store) trading.EmotionProvider {
+	if store == nil {
+		return nil
+	}
+	return tradingEmotionAdapter{store: store}
 }
 
 // newTradingNewsAdapter 在两个源都没配置时返回 nil，

@@ -64,6 +64,33 @@ func (s *Service) RunProtective(ctx context.Context, accountID, cycleID string) 
 	}
 	rules := DefaultRiskRules()
 	result := BuildProtectiveOrders(snapshot, rules, DefaultGuardConfig(), time.Now())
+	// 复核计数在这一步累加：此刻价格已经取到、论点刚被逐只检查过，
+	// 才是真正"复核了一次"。取不到行情时上面已经返回，不会虚增这个数。
+	if bumpErr := s.store.BumpReviewCounts(ctx, accountID); bumpErr != nil {
+		s.logf("event=trading_review_count_failed account=%s err=%v", accountID, bumpErr)
+	}
+	// 失效条件成立单独留痕。写在早退之前：即使这一轮没能生成卖单
+	// （例如 T+1 不可卖），"判断已经被证伪"这件事也必须留下。
+	// 只靠订单的 trigger 字段记录的话，事件流上看不到这类事实。
+	for _, order := range result.Orders {
+		if order.Trigger != TriggerInvalidation {
+			continue
+		}
+		_ = s.store.AppendEvent(ctx, Event{
+			AccountID: accountID,
+			Severity:  EventSeverityWarning,
+			Kind:      EventThesisInvalidated,
+			Symbol:    order.Symbol,
+			Message: fmt.Sprintf("%s 失效条件成立，减仓 %d 股（当初的论点：%s）",
+				order.Symbol, order.Quantity, clipRunes(order.Thesis, 60)),
+			Payload: eventPayload(map[string]any{
+				"quantity": order.Quantity,
+				"rule":     order.Invalidation,
+				"thesis":   order.Thesis,
+			}),
+			CreatedAt: time.Now().UTC(),
+		})
+	}
 	run.Checked = result.Held
 	// Triggered 统计"防守线被触发的次数"，包含触发了但卖不掉的那种。
 	// 只数订单会把"止损到了却因 T+1 卖不了"记成"没有触发"，

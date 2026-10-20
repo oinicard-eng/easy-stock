@@ -43,6 +43,10 @@ const (
 	// EventCycleEventTriggered 记录一次由行情异动触发的临时循环。
 	// 事件驱动轮次会消耗模型调用，必须能看到"是谁按下了这一轮"。
 	EventCycleEventTriggered = "cycle.event_triggered"
+	// EventThesisInvalidated 记录"买入时写下的失效条件成立了"。
+	// 它必须与止损分开留痕：止损是价格到线，失效是论证被证伪。
+	// 复盘时"这套判断在哪种情况下最先失效"只能从这类事件里统计出来。
+	EventThesisInvalidated = "guard.thesis_invalidated"
 )
 
 // Event 是一条运行事件。Payload 存结构化补充信息（标的、金额、订单号），

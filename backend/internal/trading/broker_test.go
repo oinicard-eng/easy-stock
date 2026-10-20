@@ -77,16 +77,21 @@ func TestPaperBrokerDoesNotFillAtLimitUp(t *testing.T) {
 
 func TestPaperBrokerPartialFillIsDeterministic(t *testing.T) {
 	broker := NewPaperBroker()
-	// 1000 股 × 1000 元 = 100 万，落在"大额"档，必然部分成交。
+	// 当日成交额 1 亿 → 单笔上限 50 万；1000 股 × 1000 元 = 100 万，只能成一半。
 	request := brokerRequest(SideBuy, 1000, 1100, 1000, 1000)
 	request.Account.Cash = 2_000_000
+	request.Quote.Turnover = 100_000_000
 
 	first, err := broker.Submit(context.Background(), request)
 	if err != nil {
 		t.Fatalf("撮合失败：%v", err)
 	}
 	if first.Status != OrderStatusPartial {
-		t.Fatalf("大额单应部分成交，实际 %s（成交 %d 股）", first.Status, first.FilledQuantity)
+		t.Fatalf("超过成交额 0.5%% 的单应部分成交，实际 %s（成交 %d 股）", first.Status, first.FilledQuantity)
+	}
+	if first.FilledQuantity != 400 {
+		// 50 万上限 ÷ 含滑点价 1000.30 ≈ 499 股，按 100 股整手向下取整得 400 股。
+		t.Fatalf("50 万上限应成交 400 股（整手取整），实际 %d 股", first.FilledQuantity)
 	}
 	// 同一订单重复撮合必须得到同一个数量：回放的可复现性依赖这一点。
 	for i := 0; i < 3; i++ {
@@ -99,15 +104,41 @@ func TestPaperBrokerPartialFillIsDeterministic(t *testing.T) {
 				first.FilledQuantity, i+2, again.FilledQuantity)
 		}
 	}
-	// 不同订单不应全部卡在同一个比例上（否则"确定性"会变成"一律 50%"）。
-	other := request
-	other.Order.ID = "ord-other"
-	second, err := broker.Submit(context.Background(), other)
+	// 成交额更大的票，同样金额能全额成交：上限是随流动性变的，不是固定金额。
+	deep := request
+	deep.Quote.Turnover = 300_000_000
+	result, err := broker.Submit(context.Background(), deep)
 	if err != nil {
 		t.Fatalf("撮合另一笔失败：%v", err)
 	}
-	if second.FilledQuantity == first.FilledQuantity && first.FilledQuantity == 500 {
-		t.Fatalf("不同订单的比例不应完全一致：均为 %d 股", first.FilledQuantity)
+	if result.Status != OrderStatusFilled || result.FilledQuantity != 1000 {
+		t.Fatalf("成交额 3 亿时上限 150 万，应全额成交 1000 股，实际 %s / %d 股",
+			result.Status, result.FilledQuantity)
+	}
+}
+
+func TestPaperBrokerSlippageFollowsTurnover(t *testing.T) {
+	// 成交额越冷，滑点越大；缺失时按最冷档，不能因为"没数据"就变便宜。
+	broker := NewPaperBroker()
+	price := func(turnover float64) float64 {
+		request := brokerRequest(SideBuy, 100, 10.5, 10, 10)
+		request.Quote.Turnover = turnover
+		result, err := broker.Submit(context.Background(), request)
+		if err != nil || result.Status != OrderStatusFilled {
+			t.Fatalf("成交额 %.0f 的撮合失败：%v / %s", turnover, err, result.Reason)
+		}
+		return result.Price
+	}
+	illiquid, normal, deep, unknown := price(0), price(100_000_000), price(500_000_000), price(0)
+	if !(illiquid > normal && normal > deep) {
+		t.Fatalf("滑点应随成交额递减：冷门 %.2f，正常 %.2f，深票 %.2f", illiquid, normal, deep)
+	}
+	if illiquid != unknown {
+		t.Fatalf("成交额缺失应按最冷档，%.2f != %.2f", unknown, illiquid)
+	}
+	// 冷门档 0.3%：10 元票买入价应在 10.03 附近，而不是分毫不动。
+	if illiquid < 10.02 {
+		t.Fatalf("冷门票买入滑点偏小：%.3f", illiquid)
 	}
 }
 

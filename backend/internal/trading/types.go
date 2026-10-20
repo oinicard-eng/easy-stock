@@ -162,7 +162,16 @@ type Position struct {
 	// AutoReduceAt 记录失效条件触发过一次自动减仓的时刻。
 	// 同一持仓只自动减一次：每轮都砍半，会在一次误判里用四个轮次清空仓位。
 	AutoReduceAt *time.Time `json:"auto_reduce_at,omitempty"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// EntryRegime / EntryConfidence 是建仓时的市场状态与模型自评置信度。
+	// 它们回答"这笔仓位是在什么环境下、以多大把握建的"——两三个月后
+	// 复盘时，只有这两个字段还在持仓上，计划早就被清理了。
+	EntryRegime     string  `json:"entry_regime,omitempty"`
+	EntryConfidence float64 `json:"entry_confidence,omitempty"`
+	// ReviewCount 是这只持仓被论点复核过的轮次数。
+	// 与持有天数并列给出："持有了 12 天、复核 40 次都没失效"比"12 天"
+	// 更能说明论点是被持续验证过的，而不是买入后没人再看。
+	ReviewCount int       `json:"review_count,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Sellable 是本账本唯一的「还能卖多少股」口径。
@@ -244,8 +253,12 @@ type Order struct {
 	InvalidationRule *InvalidationSpec `json:"invalidation_rule,omitempty"`
 	// ExpectedDays 是模型预期的兑现天数（交易日）。时间止损的口径，
 	// 与 stop_loss_price 一起构成"什么价位、什么时限"这对完整约束。
-	ExpectedDays int       `json:"expected_days,omitempty"`
-	Confidence   float64   `json:"confidence,omitempty"`
+	ExpectedDays int `json:"expected_days,omitempty"`
+	// EntryRegime 是下单时的市场状态，成交后原样写进持仓。
+	// 在订单上而不是仅在计划上：持仓要能独立回答"建仓时的环境"，
+	// 而计划的生命周期比持仓短得多。
+	EntryRegime string  `json:"entry_regime,omitempty"`
+	Confidence  float64 `json:"confidence,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -296,6 +309,12 @@ type Snapshot struct {
 	PendingBuyValue float64            `json:"pending_buy_value"`
 	Quotes          []foundation.Quote `json:"quotes"`
 	Positions       []Position         `json:"positions"`
+	// ATRs 是裁决时刻各票 ATR 占现价的百分比，供波动率定价使用。
+	//
+	// 为什么放在快照里而不是议决时现取：沙盘要用同一份输入重放，
+	// 现取会拿今天的波动率去重算上周的计划，差异里就混进了"时间变化"。
+	// 它不进变化检测指纹——ATR 每天都在变，算进去会让安静模式永不生效。
+	ATRs map[string]float64 `json:"atrs,omitempty"`
 	Universe        []string           `json:"universe"`
 	MissingQuotes   []string           `json:"missing_quotes,omitempty"`
 	// Market 是本轮对市场状态的判断。未评估时 Evaluated 为 false，

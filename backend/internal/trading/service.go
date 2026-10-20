@@ -81,6 +81,8 @@ type Service struct {
 	// 没有它时 K 线工具报"数据源未配置"，其余功能不受影响。
 	kline    KLineProvider
 	klineAlt KLineProvider
+	// emotion 是市场情绪周期。可选，缺失时工具明说未配置。
+	emotion EmotionProvider
 	// marketIntel / news 是"为什么涨"这一层的数据：公告、龙虎榜、大盘、两融、新闻。
 	// 与上面两项同构：可选注入，缺了就明确报错。
 	marketIntel MarketIntelProvider
@@ -179,6 +181,14 @@ func (s *Service) SetKLine(primary, fallback KLineProvider) {
 	s.klineAlt = fallback
 }
 
+// SectorFlow 返回板块资金流数据源，未注入时为 nil。
+// 事件通道用它判断"板块资金是否转负"，拿到 nil 就跳过这一类触发。
+func (s *Service) SectorFlow() SectorFlowProvider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sectorFlow
+}
+
 // SetMarketIntel 注入公告/龙虎榜/大盘/两融数据源。可选：没有它时这五个工具
 // 会明确说"数据源未配置"，模型换用价格类工具，而不是收到一份空白数据。
 func (s *Service) SetMarketIntel(provider MarketIntelProvider) {
@@ -192,6 +202,14 @@ func (s *Service) SetNews(provider NewsSearchProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.news = provider
+}
+
+// SetEmotion 注入市场情绪周期数据源。可选：没有它时 get_market_context
+// 会明确标注"未配置"，而不是让模型把缺失当成"情绪中性"。
+func (s *Service) SetEmotion(provider EmotionProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.emotion = provider
 }
 
 // rememberCatalog 缓存最近一次全市场快照，供调研工具按行业下钻使用。
@@ -219,6 +237,7 @@ func (s *Service) buildToolbox(accountID string, snapshot Snapshot, now time.Tim
 	flow := s.sectorFlow
 	primary, fallback := s.kline, s.klineAlt
 	intel, news := s.marketIntel, s.news
+	emotion := s.emotion
 	s.mu.Unlock()
 	return &Toolbox{
 		store:       s.store,
@@ -230,6 +249,7 @@ func (s *Service) buildToolbox(accountID string, snapshot Snapshot, now time.Tim
 		klineAlt:    fallback,
 		marketIntel: intel,
 		news:        news,
+		emotion:     emotion,
 		now:         now,
 	}
 }
@@ -602,6 +622,7 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		// 前者每次都能重算，后者只在本轮有效，塞进快照会让计划体积无谓增长。
 		Calibration:   s.calibrationPromptLine(ctx, accountID, time.Now()),
 		PriorResearch: s.PriorResearchForPrompt(ctx, accountID, time.Now()),
+		PlanDiff:      s.PlanDiffForPrompt(ctx, accountID, planID, snapshot, time.Now()),
 	})
 
 	startedAt := time.Now()
@@ -631,7 +652,7 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	}
 	// 波动率校正先于预期天数补齐：补失效条件时会参考止损价，
 	// 顺序反了会把失效条件对齐到一个马上要被改掉的价位上。
-	stopVerdicts := s.AdjustDraftStops(ctx, &draft, snapshot, rules)
+	stopVerdicts := s.AdjustDraftStops(ctx, &draft, &snapshot, rules)
 	// 预期天数与失效条件在裁决之前补齐：它们会写进订单、持仓与裁决记录，
 	// 补在守卫那层的话，复盘就分不清"这个数字是模型定的还是系统默认的"。
 	ApplyHorizonDefaults(&draft, request.Horizon)
@@ -929,6 +950,7 @@ func (s *Service) match(ctx context.Context, account Account, position Position,
 			Name:          quote.Name,
 			Price:         quote.Price,
 			PreviousClose: quote.PreviousClose,
+			Turnover:      quote.Amount,
 		},
 	})
 	if err != nil {

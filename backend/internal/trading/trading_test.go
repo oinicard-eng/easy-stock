@@ -76,9 +76,15 @@ func TestBuildOrdersComputesSharesAndKeepsRiskBounded(t *testing.T) {
 	if order.Status != OrderStatusPending {
 		t.Fatalf("期望订单通过校验，实际状态 %s：%s", order.Status, order.RejectReason)
 	}
-	// 按限价 10.2 计算 10% 仓位：10000/10.2=980 股，向下取整手为 900 股。
-	if order.Quantity != 900 {
-		t.Fatalf("按限价折算应为 900 股，实际 %d", order.Quantity)
+	// 置信度定价后的股数：目标 10% × 置信度 0.62 的系数 0.81 = 8.1%，
+	// 8.1% × 10 万 / 限价 10.2 = 794 股，向下取整手为 700 股。
+	// 这条断言同时覆盖了"置信度真的会影响成交股数"——只断言订单上的
+	// Confidence 字段是不够的，那个字段可能是写了但没人用。
+	if order.Quantity != 700 {
+		t.Fatalf("置信度定价后应为 700 股，实际 %d", order.Quantity)
+	}
+	if order.TargetWeightPercent != 8.1 {
+		t.Fatalf("定价后目标权重应为 8.1%%，实际 %.2f", order.TargetWeightPercent)
 	}
 	if order.Confidence != 0.62 {
 		t.Fatalf("置信度应归一化到 0.62，实际 %v", order.Confidence)
@@ -116,6 +122,51 @@ func TestBuildOrdersRejectsOverweightAndWideStop(t *testing.T) {
 		if len(orders) != 1 || orders[0].Status != OrderStatusRejected {
 			t.Fatalf("用例 %d 应被风控拒绝，实际 %+v", index, orders)
 		}
+	}
+}
+
+func TestBuildOrdersFallsBackToOneLotAfterPricing(t *testing.T) {
+	// 30 元的票、10 万权益：5% = 5000 元够一手；
+	// 但置信度 0.3（×0.65）叠加 ATR 5%（×0.55）后只剩 1.79%，
+	// 1790 元 / 30.5 = 58 股，不足一手。此时应退到一手，而不是整笔作废。
+	snapshot := testSnapshot([]foundation.Quote{testQuote("000001.SZ", "平安银行", 30, 30)})
+	snapshot.ATRs = map[string]float64{"000001.SZ": 5}
+	draft := DraftPlan{Regime: "range", Orders: []DraftOrder{{
+		Symbol: "000001.SZ", Side: "buy", TargetWeightPercent: 5, OrderType: "limit",
+		LimitPrice: 30.5, StopLossPrice: 28, Confidence: 0.3,
+	}}}
+	orders, verdicts := BuildOrders(DefaultAccountID, draft, snapshot, DefaultRiskRules(), time.Now())
+	if len(orders) != 1 || orders[0].Status != OrderStatusPending {
+		t.Fatalf("定价压到不足一手时应按一手执行，实际 %+v / %+v", orders, verdicts)
+	}
+	if orders[0].Quantity != 100 {
+		t.Fatalf("应买最小一手 100 股，实际 %d", orders[0].Quantity)
+	}
+	minLot := false
+	for _, verdict := range verdicts {
+		if verdict.Code == "sizing.min_lot" {
+			minLot = true
+		}
+	}
+	if !minLot {
+		t.Fatalf("应留下「按最小一手执行」的裁决，实际 %+v", verdicts)
+	}
+}
+
+func TestBuildOrdersBlocksTinyRequestEvenIfBelowOneLot(t *testing.T) {
+	// 模型自己只要 0.5%（500 元 < 一手 3050 元）时不兜底：
+	// 那是它的判断，系统替它放大六倍就是把仓位管理的责任接过来了。
+	snapshot := testSnapshot([]foundation.Quote{testQuote("000001.SZ", "平安银行", 30, 30)})
+	draft := DraftPlan{Orders: []DraftOrder{{
+		Symbol: "000001.SZ", Side: "buy", TargetWeightPercent: 0.5, OrderType: "limit",
+		LimitPrice: 30.5, StopLossPrice: 28, Confidence: 1,
+	}}}
+	orders, verdicts := BuildOrders(DefaultAccountID, draft, snapshot, DefaultRiskRules(), time.Now())
+	if len(orders) != 1 || orders[0].Status != OrderStatusRejected {
+		t.Fatalf("模型自己只要不足一手时应拒绝，实际 %+v", orders)
+	}
+	if len(verdicts) == 0 || verdicts[0].Code != "sizing.below_lot" {
+		t.Fatalf("应给出 below_lot 拦截，实际 %+v", verdicts)
 	}
 }
 
@@ -178,7 +229,8 @@ func TestServiceGeneratesAndExecutesPaperPlan(t *testing.T) {
 	if ready.Status != PlanStatusDraft {
 		t.Fatalf("期望待确认状态，实际 %s（%s）", ready.Status, ready.ErrorMessage)
 	}
-	if len(ready.Orders) != 1 || ready.Orders[0].Quantity != 900 {
+	// 10% 目标 × 置信度 0.6 的系数 0.8 = 8%，8% × 10 万 / 10.2 = 784 股 → 700 股。
+	if len(ready.Orders) != 1 || ready.Orders[0].Quantity != 700 {
 		t.Fatalf("订单数量异常：%+v", ready.Orders)
 	}
 	// 裁决必须落库，且与计划互相指认：这是"每次判断可观察"的最小要求。
@@ -217,20 +269,29 @@ func TestServiceGeneratesAndExecutesPaperPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取账户失败：%v", err)
 	}
-	if len(positions) != 1 || positions[0].Quantity != 900 {
+	if len(positions) != 1 || positions[0].Quantity != 700 {
 		t.Fatalf("持仓异常：%+v", positions)
 	}
 	if positions[0].Available != 0 {
 		t.Fatalf("T+1 当日买入不可卖，实际可卖 %d", positions[0].Available)
 	}
+	// 建仓上下文跟着持仓走：市场状态未评估时退回模型写的 regime，
+	// 置信度用订单上的归一化值。这两项是三个月后复盘时的唯一依据。
+	if positions[0].EntryRegime != "进攻" {
+		t.Fatalf("持仓应带上入场环境「进攻」，实际 %q", positions[0].EntryRegime)
+	}
+	if positions[0].EntryConfidence != 0.6 {
+		t.Fatalf("持仓应带上入场置信度 0.6，实际 %.2f", positions[0].EntryConfidence)
+	}
 	// 成交价带滑点：买单按现价上滑，并被限价 10.20 封住。
-	// 断言"在限价内、不高于现价 + 滑点"而不是断言一个精确数字，
+	// 断言"在限价内、不高于现价 + 最冷档滑点"而不是断言一个精确数字，
 	// 否则调整滑点参数时这条用例会变成纯粹的维护负担。
+	// 测试行情没有成交额，按最冷档 0.3% 计，所以上界是 10.03。
 	fillPrice := executed.Orders[0].FilledPrice
-	if fillPrice < 10 || fillPrice > 10.01 {
+	if fillPrice < 10 || fillPrice > 10.04 {
 		t.Fatalf("成交价应在现价与滑点之间，实际 %.4f", fillPrice)
 	}
-	expectedCash := 100000 - 900*fillPrice - executed.Orders[0].Fee
+	expectedCash := 100000 - float64(executed.Orders[0].FilledQuantity)*fillPrice - executed.Orders[0].Fee
 	if diff := account.Cash - expectedCash; diff > 0.01 || diff < -0.01 {
 		t.Fatalf("现金应为 %.2f，实际 %.2f", expectedCash, account.Cash)
 	}

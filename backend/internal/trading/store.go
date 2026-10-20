@@ -16,6 +16,9 @@ import (
 	"easy-stock/backend/internal/trading/policy"
 )
 
+// memoryDBSeq 保证每个内存库有唯一名字，见 OpenStore。
+var memoryDBSeq atomic.Uint64
+
 // DefaultAccountID 是模拟盘主账户。P1 只暴露一个账户，但表结构按多账户设计，
 // 后续接入实盘时可用 broker 维度区分。
 const DefaultAccountID = "paper-main"
@@ -43,7 +46,12 @@ func OpenStore(path string) (*Store, error) {
 	}
 	dataSource := path
 	if path == ":memory:" {
-		dataSource = fmt.Sprintf("file:easy-stock-trading-%d?mode=memory&cache=shared", time.Now().UnixNano())
+		// 名字里必须带一个进程内自增序号，不能只用时间戳：
+		// Windows 的时间片粒度可能粗到毫秒级，同一个测试里连续创建两个内存库
+		// 会拿到同一个名字，而 cache=shared 会让它们共享同一份数据——
+		// 表现为"两个独立账本互相看见对方的计划"，且只在特定时序下出现。
+		dataSource = fmt.Sprintf("file:easy-stock-trading-%d-%d?mode=memory&cache=shared",
+			time.Now().UnixNano(), memoryDBSeq.Add(1))
 	} else if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("创建交易数据目录失败: %w", err)
 	}
@@ -149,6 +157,13 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"trading_positions", "invalidation_rule", "TEXT NOT NULL DEFAULT ''"},
 		{"trading_positions", "expected_days", "INTEGER NOT NULL DEFAULT 0"},
 		{"trading_positions", "auto_reduce_at", "TEXT NOT NULL DEFAULT ''"},
+		// 入场环境与入场置信度：回答"这笔仓位是在什么环境下、以多大把握建的"。
+		// 与记忆里的同名信息不重复——记忆只记已平仓的交易，持仓还在，
+		// 它需要自己的一份入场快照，否则只能去翻当初的计划。
+		{"trading_positions", "entry_regime", "TEXT NOT NULL DEFAULT ''"},
+		{"trading_positions", "entry_confidence", "REAL NOT NULL DEFAULT 0"},
+		// 论点被复核过的轮次数。它比"持有了几天"更能说明系统看过它多少次。
+		{"trading_positions", "review_count", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.define); err != nil {
 			return err
@@ -336,7 +351,7 @@ func (s *Store) ResetAccount(ctx context.Context, id string, initialCash float64
 // 必须共用它：各写一份的结果是新增一列时漏改一处，那处读出来的持仓就永远没有防守线。
 const positionColumns = `account_id,symbol,name,quantity,available_quantity,average_cost,last_price,
 	reserved_quantity,stop_loss_price,take_profit_price,peak_price,reduce_count,sector,opened_at,last_buy_date,
-	thesis,invalidation,invalidation_rule,expected_days,auto_reduce_at,updated_at`
+	thesis,invalidation,invalidation_rule,expected_days,auto_reduce_at,entry_regime,entry_confidence,review_count,updated_at`
 
 // scanPosition 按 positionColumns 的顺序读一行。opened_at 为空串表示建仓时间未知
 // （旧数据），此时返回 nil 而不是零值时间——零值时间会被算成"持有 2000 天"。
@@ -347,7 +362,8 @@ func scanPosition(scanner interface{ Scan(...any) error }, position *Position) e
 		&position.ReservedQuantity, &position.StopLossPrice, &position.TakeProfitPrice,
 		&position.PeakPrice, &position.ReduceCount, &position.Sector, &openedDB,
 		&lastBuyDB, &position.Thesis, &position.Invalidation, &ruleDB, &position.ExpectedDays,
-		&autoReduceDB, &updated); err != nil {
+		&autoReduceDB, &position.EntryRegime, &position.EntryConfidence, &position.ReviewCount,
+		&updated); err != nil {
 		return err
 	}
 	position.LastBuyDate = lastBuyDB
@@ -813,11 +829,12 @@ func (s *Store) applyBuy(ctx context.Context, tx *sql.Tx, order Order, position 
 	if !exists {
 		_, err = tx.ExecContext(ctx, `INSERT INTO trading_positions(account_id,symbol,name,quantity,available_quantity,average_cost,last_price,
 			reserved_quantity,stop_loss_price,take_profit_price,peak_price,reduce_count,sector,opened_at,last_buy_date,
-			thesis,invalidation,invalidation_rule,expected_days,auto_reduce_at,updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			thesis,invalidation,invalidation_rule,expected_days,auto_reduce_at,entry_regime,entry_confidence,review_count,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			order.AccountID, order.Symbol, order.Name, quantity, 0, price, price,
 			0, round2(stop), round2(takeProfit), price, 0, order.Sector, nowText(now), today,
-			order.Thesis, order.Invalidation, ruleJSON, order.ExpectedDays, "", nowText(now))
+			order.Thesis, order.Invalidation, ruleJSON, order.ExpectedDays, "",
+			order.EntryRegime, round4(order.Confidence), 0, nowText(now))
 		return err
 	}
 	newQuantity := position.Quantity + quantity
@@ -844,13 +861,31 @@ func (s *Store) applyBuy(ctx context.Context, tx *sql.Tx, order Order, position 
 	if price > peak {
 		peak = price
 	}
+	// 入场环境与置信度只在首次建仓时写死，加仓只补空缺：
+	// 它们描述的是"这笔仓位最初的论点从哪来"，被后续加仓覆盖就失去意义了。
+	entryRegime := firstNonEmpty(position.EntryRegime, order.EntryRegime)
+	entryConfidence := position.EntryConfidence
+	if entryConfidence <= 0 {
+		entryConfidence = round4(order.Confidence)
+	}
 	_, err = tx.ExecContext(ctx, `UPDATE trading_positions SET quantity=?,average_cost=?,last_price=?,last_buy_date=?,
 		stop_loss_price=?,take_profit_price=?,peak_price=?,sector=?,thesis=?,invalidation=?,invalidation_rule=?,
-		expected_days=?,updated_at=?
+		expected_days=?,entry_regime=?,entry_confidence=?,updated_at=?
 		WHERE account_id=? AND symbol=?`,
 		newQuantity, newCost, price, today, round2(stop), round2(takeProfit), round2(peak),
 		firstNonEmpty(order.Sector, position.Sector), thesis, invalidation, ruleJSON, expectedDays,
-		nowText(now), order.AccountID, order.Symbol)
+		entryRegime, entryConfidence, nowText(now), order.AccountID, order.Symbol)
+	return err
+}
+
+// BumpReviewCounts 累加"论点被复核过"的轮次数，一次覆盖全部持仓。
+//
+// 为什么不在守卫里逐只写：复核是每只持仓都发生的同一件事，
+// 逐只 UPDATE 只会放大 SQLite 的写锁竞争，换来的是同一个计数。
+// 也不改 updated_at——持仓内容没有变化，改了会让"上次变动时间"失真。
+func (s *Store) BumpReviewCounts(ctx context.Context, accountID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE trading_positions SET review_count=review_count+1
+		WHERE account_id=? AND quantity>0`, accountID)
 	return err
 }
 

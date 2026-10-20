@@ -1484,6 +1484,15 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 													</span>
 												) : null}
 												{position.expected_days ? <span className="trading-subtle">预期 {position.expected_days} 日</span> : null}
+												{/* 入场置信度与建仓环境：复盘时回答「当时多有把握」，
+												    它比买入理由更客观——理由是叙述，置信度是当时的数字。 */}
+												{position.entry_confidence ? (
+													<span className="trading-subtle" title={position.entry_regime ? `建仓环境：${position.entry_regime}` : ''}>
+														入场置信 {position.entry_confidence.toFixed(2)}
+													</span>
+												) : null}
+												{/* 复核轮次：证明这笔仓位不是买入后没人再看 */}
+												{position.review_count ? <span className="trading-subtle">已复核 {position.review_count} 轮</span> : null}
 												{position.auto_reduce_at ? <span className="trading-chip">已自动减仓一次</span> : null}
 											</td>
 											<td>

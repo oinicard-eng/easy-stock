@@ -136,7 +136,7 @@ func (s *Service) storeATR(profile atrProfile) {
 // 只在买入建议上动手，且只改 stop_loss_price——目标权重、股数、方向一概不碰。
 // 原因：止损距离是"这只票正常波动有多大"的客观问题，模型的主观判断
 // （为什么买、买多少）不应该被波动率参数改写。
-func (s *Service) AdjustDraftStops(ctx context.Context, draft *DraftPlan, snapshot Snapshot, rules RiskRules) []policy.Verdict {
+func (s *Service) AdjustDraftStops(ctx context.Context, draft *DraftPlan, snapshot *Snapshot, rules RiskRules) []policy.Verdict {
 	rules = rules.Normalize()
 	verdicts := make([]policy.Verdict, 0, 4)
 	quotes := map[string]float64{}
@@ -144,6 +144,9 @@ func (s *Service) AdjustDraftStops(ctx context.Context, draft *DraftPlan, snapsh
 		if quote.Price > 0 {
 			quotes[quote.Symbol] = quote.Price
 		}
+	}
+	if snapshot.ATRs == nil {
+		snapshot.ATRs = map[string]float64{}
 	}
 	// 单轮最多校正 8 笔，与 MaxOrders 同量级；再多说明已经不是正常计划。
 	for index := range draft.Orders {
@@ -162,6 +165,9 @@ func (s *Service) AdjustDraftStops(ctx context.Context, draft *DraftPlan, snapsh
 		if !profile.Valid() {
 			continue
 		}
+		// 波动率画像同时记进快照：定价（仓位）与防守（止损）必须用同一个数，
+		// 分别去取一次会在两次请求之间拿到不同的 ATR，复盘时无法解释。
+		snapshot.ATRs[normalizeSymbolOrEmpty(order.Symbol)] = profile.ATRPercent()
 		adjusted, note := atrAdjustStop(order.StopLossPrice, price, profile.ATR, rules.MaxStopLossPercent)
 		if note == "" {
 			continue

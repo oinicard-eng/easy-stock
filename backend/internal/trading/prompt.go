@@ -59,6 +59,9 @@ type PlanPromptInput struct {
 	// 之所以要传：同一个板块的资金流，模型可能连续三轮各查一次，
 	// 每次都是一次模型往返；而三轮之间真正变化的往往只有价格。
 	PriorResearch string
+	// PlanDiff 是上一轮候选池与本轮的差异（谁消失、谁新增、上一轮建议过的票还在不在）。
+	// 与 Blocks 的分工：Blocks 说"你的想法被否了"，PlanDiff 说"世界变了多少"。
+	PlanDiff []string
 }
 
 // BlockedIntent 是一条被拦下的建议。它保留模型的原始意图（想买多少、什么价位），
@@ -101,6 +104,12 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	fmt.Fprintf(&builder, "3. 不要输出股数、金额或费用，只输出目标权重百分比；股数由系统换算。\n")
 	fmt.Fprintf(&builder, "4. 每笔买入必须给出止损价（低于买入价、距离不超过 %.1f%%）与 invalidation 失效条件，两者一起构成退出承诺。\n", rules.MaxStopLossPercent)
 	fmt.Fprintf(&builder, "5. 单票目标权重不超过 %.1f%%，单次最多 %d 笔建议。\n", rules.MaxSingleWeightPercent, rules.MaxOrders)
+	// 定价公式必须提前说明：模型如果以为"写多少就买多少"，就会习惯性写满，
+	// 然后每次都拿到打折后的额度，却不知道为什么。把公式写出来，
+	// 它才知道 confidence 是真正影响金额的输入，而不是一个装饰字段。
+	builder.WriteString("   目标权重只是上限，实际额度 = 目标 × (0.5 + 0.5 × confidence) × 波动率系数；\n")
+	builder.WriteString("   波动率系数 = clamp(2.5 / ATR占现价%, 0.55, 1)，只减不增。confidence 写 0.9 与写 0.5，\n")
+	builder.WriteString("   拿到的钱相差两成以上；用不准的自信去换额度，只会让自己的建议被系统压小。\n")
 	fmt.Fprintf(&builder, "6. 买入后现金占比不得低于 %.1f%%，总仓位不得高于 %.1f%%。\n", rules.MinCashPercent, exposureLimit)
 	fmt.Fprintf(&builder, "7. 同一标的只能出现一次；卖出只能针对已有持仓，且不超过可卖数量。\n")
 	fmt.Fprintf(&builder, "8. 单笔止损触发时的账户亏损不得超过总资产的 %.1f%%。\n", rules.MaxRiskPerTradePercent)
@@ -161,6 +170,17 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 			}
 			if days := holdingDays(position.OpenedAt, input.Now); days > 0 {
 				fmt.Fprintf(&builder, "，已持有 %d 天", days)
+			}
+			// 入场环境与入场置信度：让模型看到"这是我在什么环境下、多有把握时买的"。
+			// 没有它，模型只能凭现在的价格重新解释当初的买入理由。
+			if position.EntryRegime != "" {
+				fmt.Fprintf(&builder, "，建仓环境 %s", position.EntryRegime)
+			}
+			if position.EntryConfidence > 0 {
+				fmt.Fprintf(&builder, "，当时置信度 %.2f", position.EntryConfidence)
+			}
+			if position.ReviewCount > 0 {
+				fmt.Fprintf(&builder, "，已复核 %d 轮", position.ReviewCount)
 			}
 			builder.WriteString("\n")
 		}
@@ -258,6 +278,17 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 		}
 		builder.WriteString("原样再提一次只会再被拦一次，并浪费本轮唯一的计划名额。请据此调整：换标的、降权重，或本轮放弃这个方向。\n")
 		builder.WriteString("如果认为拦截本身有误（例如行业分类不对），请在 summary 中说明，不要用改代码或改数量的方式绕过。\n")
+	}
+
+	// 候选池差异与拦截记录是两件不同的事：前者说"世界变了"，
+	// 后者说"你的想法被否了"。只给后者，模型会误以为池子没变。
+	if len(input.PlanDiff) > 0 {
+		builder.WriteString("\n### 上一轮与本轮的标的差异\n")
+		for _, line := range input.PlanDiff {
+			fmt.Fprintf(&builder, "- %s\n", line)
+		}
+		builder.WriteString("标的消失通常是因为涨跌幅或成交额掉出筛选，不代表它变差了；\n")
+		builder.WriteString("但掉出候选池的票本轮买不了，不要在建议里出现。\n")
 	}
 
 	builder.WriteString("\n## 六、行情快照（唯一可用数据源）\n")

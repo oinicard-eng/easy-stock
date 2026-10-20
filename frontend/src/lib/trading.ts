@@ -79,6 +79,12 @@ export type TradePosition = {
 	expected_days?: number;
 	/** 失效条件已触发过一次自动减仓的时刻 */
 	auto_reduce_at?: string;
+	/** 建仓时的市场状态（与持仓一起存，计划过期后仍可查） */
+	entry_regime?: string;
+	/** 建仓时的模型自评置信度，用于事后检验"当时有多确定" */
+	entry_confidence?: number;
+	/** 论点被复核过的轮次数 */
+	review_count?: number;
 };
 
 export type TradeOrder = {

@@ -104,6 +104,14 @@ const (
 	// 单独成码而不是并进 sizing.scaled：后者是组合总额度不够，
 	// 前者是"模型自己也没把握"——复盘时这两件事的处置方向完全相反。
 	CodeSizingConfidence = "sizing.confidence"
+	// CodeSizingATR 表示目标权重已按波动率（ATR）缩减。
+	// 与置信度分开编码：复盘时"模型没把握"和"票太波动"是两件不同的事，
+	// 合成一个代码就分不清该改提示词还是该改风控参数。
+	CodeSizingATR = "sizing.atr"
+	// CodeSizingMinLot 表示定价后的金额不足一手，改按最小一手执行。
+	// 它是 adjust 而非 block：一手是账户能执行的最小单位，
+	// 定价的目的是"别买太多"，不是"别买"。
+	CodeSizingMinLot = "sizing.min_lot"
 
 	CodePositionNotHeld     = "position.not_held"
 	CodePositionUnavailable = "position.unavailable"

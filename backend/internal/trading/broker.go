@@ -25,6 +25,10 @@ type QuoteView struct {
 	Name          string
 	Price         float64
 	PreviousClose float64
+	// Turnover 是当日累计成交额（元）。滑点档位与流动性上限都按它算：
+	// 没有这个数字，撮合就只能假设"无论多大的单都有足够对手盘"，
+	// 而那个假设正是回测收益虚高的主要来源。0 表示数据源没给。
+	Turnover float64
 }
 
 type BrokerResult struct {
@@ -43,6 +47,8 @@ type Broker interface {
 // PaperBroker 按最新价做保守撮合：
 //   - 限价买入仅在现价不高于限价时成交，成交价为现价（加滑点，不高于限价）；
 //   - 限价卖出仅在现价不低于限价时成交（减滑点，不低于限价）；
+//   - 滑点按当日成交额分档：越冷的票进得越贵，成交额缺失按最冷档；
+//   - 单笔不超过当日成交额的 0.5%，超出只成交能吃掉的部分；
 //   - 市价单按现价成交，但仍受涨跌停价校验，越界直接拒绝；
 //   - 涨停的买单、跌停的卖单不成交：真实市场里那一刻没有对手盘，
 //     用"现价成交"会让回测里的收益凭空多出一截；
@@ -51,25 +57,28 @@ type Broker interface {
 // 与第一版（永远按现价全额成交）的区别，正是"回测很漂亮、实盘做不到"的三个来源：
 // 成交价更好、成交量大、涨跌停照样成交。
 type PaperBroker struct {
-	// SlippageBPS 是成交价相对现价的滑点（万分之几）。
-	// 默认 8bp：A 股竞价撮合的小单滑点大约在这个量级，
-	// 给 0 会让所有回测收益都偏高一点点，而这一点点会累积成系统性乐观。
+	// SlippageBPS 是滑点的手动覆盖值（万分之几）。0 表示按成交额自动分档。
+	// 留这个开关是为了压力测试（比如"滑点翻倍会怎样"），正常跑不该设它。
 	SlippageBPS float64
 }
 
-func NewPaperBroker() *PaperBroker { return &PaperBroker{SlippageBPS: defaultSlippageBPS} }
+func NewPaperBroker() *PaperBroker { return &PaperBroker{} }
 
 func (b *PaperBroker) Name() string { return "paper" }
 
 const (
-	defaultSlippageBPS = 8.0
-	// 部分成交的门槛。金额越大越难一次吃完：
-	// 30 万以内按全额，100 万以内按 80%，再往上按 50%。
-	// 这些不是精确的市场冲击模型，只是让"大单一定全成"这个假设不再成立。
-	partialFillThresholdSmall = 300_000
-	partialFillThresholdLarge = 1_000_000
-	partialFillRatioMedium    = 0.8
-	partialFillRatioLarge     = 0.5
+	// 滑点按当日成交额分档。流动性越差，一单打进去推动价格越多。
+	// 这不是精确的市场冲击模型，但它把"所有票都能按现价轻松成交"这个
+	// 最离谱的假设改成了"票越冷，进得越贵"。
+	slippageIlliquid = 0.0030 // 成交额 < 5000 万
+	slippageNormal   = 0.0015 // 5000 万 – 3 亿
+	slippageDeep     = 0.0005 // > 3 亿
+	turnoverNormal   = 50_000_000
+	turnoverDeep     = 300_000_000
+	// liquidityShareCap 是单笔可吃掉的当日成交额上限。
+	// 0.5% 意味着 1 亿成交额的票，单笔最多 50 万：再大就必须分几天做，
+	// 否则"一次买满"在真实市场里会把价格推走。
+	liquidityShareCap = 0.005
 )
 
 func (b *PaperBroker) Submit(_ context.Context, request BrokerOrder) (BrokerResult, error) {
@@ -89,10 +98,11 @@ func (b *PaperBroker) Submit(_ context.Context, request BrokerOrder) (BrokerResu
 	}
 
 	quantity := order.Quantity
+	slip := b.slippageFor(quote.Turnover)
 	// 撮合可花的钱是「账面现金减其他挂单冻结」，本单自身冻结不算在内。
 	if order.Side == SideBuy {
 		cash := request.Account.CashForOrder(order)
-		unitCost := quote.Price * (1 + commissionRate + transferRate + b.slippage())
+		unitCost := quote.Price * (1 + commissionRate + transferRate + slip)
 		maxShares := int(cash / unitCost)
 		maxShares = roundSharesDown(maxShares, MinBoardLot(order.Symbol))
 		if maxShares < quantity {
@@ -134,7 +144,7 @@ func (b *PaperBroker) Submit(_ context.Context, request BrokerOrder) (BrokerResu
 		return BrokerResult{Status: OrderStatusRejected, Reason: "未知买卖方向"}, nil
 	}
 
-	price := b.fillPrice(order.Side, quote.Price, order.LimitPrice)
+	price := b.fillPrice(order.Side, quote.Price, order.LimitPrice, slip)
 	fee := TradeFee(order.Side, float64(quantity)*price)
 	if order.Side == SideBuy {
 		total := float64(quantity)*price + fee
@@ -148,14 +158,22 @@ func (b *PaperBroker) Submit(_ context.Context, request BrokerOrder) (BrokerResu
 			fee = TradeFee(order.Side, float64(quantity)*price)
 		}
 	}
-	// 部分成交：金额越大越难一次吃完。同一订单多次撮合的比例是确定的
-	// （见 fillRatio），否则同一份回放在两次运行里会得到不同结果。
-	if ratio := b.fillRatio(order, float64(quantity)*price); ratio < 1 {
-		partial := roundSharesDown(int(float64(quantity)*ratio), MinBoardLot(order.Symbol))
-		if partial <= 0 {
-			return BrokerResult{Status: OrderStatusPending, Reason: fmt.Sprintf("盘口深度不足，%d 股无法成交", quantity)}, nil
+	// 流动性上限：单笔不超过当日成交额的 0.5%。
+	//
+	// 这条比滑点更硬：滑点只是"买贵一点"，而超出盘口深度的那部分根本成交不了。
+	// 不做截断的话，一笔 500 万的单打进日成交 2000 万的票会一次全成，
+	// 回测里看不见任何冲击成本，实盘第一天就会发现买不完。
+	if quote.Turnover > 0 {
+		capNotional := quote.Turnover * liquidityShareCap
+		if float64(quantity)*price > capNotional {
+			capped := roundSharesDown(int(capNotional/price), MinBoardLot(order.Symbol))
+			if capped <= 0 {
+				return BrokerResult{Status: OrderStatusPending, Reason: fmt.Sprintf(
+					"%s 当日成交额 %.0f 万元，单笔上限不足一手，本轮不成交", order.Symbol, quote.Turnover/10000)}, nil
+			}
+			quantity = capped
+			fee = TradeFee(order.Side, float64(quantity)*price)
 		}
-		quantity = partial
 	}
 	status := OrderStatusFilled
 	if quantity < order.Quantity {
@@ -164,20 +182,30 @@ func (b *PaperBroker) Submit(_ context.Context, request BrokerOrder) (BrokerResu
 	return BrokerResult{Status: status, FilledQuantity: quantity, Price: price, Fee: fee}, nil
 }
 
-// slippage 返回滑点比例，非法配置按默认值处理。
-func (b *PaperBroker) slippage() float64 {
-	if b.SlippageBPS < 0 || b.SlippageBPS > 100 {
-		return defaultSlippageBPS / 10000
+// slippageFor 按当日成交额返回滑点比例。
+//
+// 成交额缺失（0）时按最低流动性档处理：宁可让模拟盘显得更难做，
+// 也不能因为"数据源没给这个字段"就让所有成交都变便宜。
+// 未知不等于好，这条规则在撮合里比在任何地方都重要。
+func (b *PaperBroker) slippageFor(turnover float64) float64 {
+	if b.SlippageBPS > 0 && b.SlippageBPS <= 100 {
+		return b.SlippageBPS / 10000
 	}
-	return b.SlippageBPS / 10000
+	switch {
+	case turnover >= turnoverDeep:
+		return slippageDeep
+	case turnover >= turnoverNormal:
+		return slippageNormal
+	default:
+		return slippageIlliquid
+	}
 }
 
 // fillPrice 在限价约束内应用滑点：买入往上滑、卖出往下滑。
 //
 // 滑点方向永远对自己不利，这是刻意的——反方向的滑点等于内幕信息，
 // 只存在于"想让回测好看"的实现里。
-func (b *PaperBroker) fillPrice(side Side, market, limit float64) float64 {
-	slip := b.slippage()
+func (b *PaperBroker) fillPrice(side Side, market, limit, slip float64) float64 {
 	switch side {
 	case SideBuy:
 		price := market * (1 + slip)
@@ -194,37 +222,6 @@ func (b *PaperBroker) fillPrice(side Side, market, limit float64) float64 {
 	default:
 		return round2(market)
 	}
-}
-
-// fillRatio 返回本次可成交比例（0–1）。
-//
-// 用订单 ID 的哈希做确定性抖动：同一笔单在"资金反算"或"重放"时得到同一个比例，
-// 不同订单之间又不会全部卡在同一个整数比例上。用随机数会让回放不可复现，
-// 而"这次为什么只成交了 60%"必须能被重现，否则无法判断是模型问题还是撮合问题。
-func (b *PaperBroker) fillRatio(order Order, notional float64) float64 {
-	base := 1.0
-	switch {
-	case notional > partialFillThresholdLarge:
-		base = partialFillRatioLarge
-	case notional > partialFillThresholdSmall:
-		base = partialFillRatioMedium
-	}
-	if base >= 1 {
-		return 1
-	}
-	hash := fnv32(order.ID)
-	// 在 [base, 1) 之间取一个确定值。
-	span := 1 - base
-	return base + float64(hash%1000)/1000*span
-}
-
-func fnv32(value string) uint32 {
-	hash := uint32(2166136261)
-	for i := 0; i < len(value); i++ {
-		hash ^= uint32(value[i])
-		hash *= 16777619
-	}
-	return hash
 }
 
 // UnimplementedBroker 是实盘通道的显式占位，任何调用都会失败而不是静默降级。

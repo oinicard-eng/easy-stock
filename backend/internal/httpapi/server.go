@@ -504,6 +504,10 @@ func NewServer(config any) *Server {
 		if news := newTradingNewsAdapter(s.newsProvider, s.stockNewsSearch); news != nil {
 			s.trading.SetNews(news)
 		}
+		// 情绪周期：回答"市场人气冷不冷"，与指数涨跌不是同一个量。
+		if emotion := newTradingEmotionAdapter(cfg.MarketEmotionStore); emotion != nil {
+			s.trading.SetEmotion(emotion)
+		}
 		// 自动循环只构造不启动：Start 由 main 在服务可用之后显式调用。
 		// 构造时启动会让"刚部署完就自动开始交易"变成默认行为。
 		s.autopilot = trading.NewAutopilot(s.trading, cfg.Logger)

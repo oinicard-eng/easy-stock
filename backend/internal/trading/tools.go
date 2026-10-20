@@ -83,6 +83,9 @@ type Toolbox struct {
 	// marketIntel / news 回答的是"为什么涨"：公告、龙虎榜、大盘、两融、新闻。
 	// 只有价格结构时，模型写出的理由只能是价格的同义反复。
 	marketIntel MarketIntelProvider
+	// emotion 是市场情绪周期（人气阶段）。它回答"现在市场冷不冷"，
+	// 与 marketIntel 的指数涨跌是两个维度：指数可能微涨而人气已在退潮。
+	emotion EmotionProvider
 	news        NewsSearchProvider
 	now         time.Time
 }

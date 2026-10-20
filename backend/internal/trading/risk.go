@@ -57,6 +57,12 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 		return orders, verdicts
 	}
 	accepted := draft.Orders
+	// 入场环境以系统判定的市场状态为准，缺失时退回模型自己写的 regime。
+	// 两条都存不下来的话，持仓就永远不知道自己是在什么环境下建的。
+	entryRegime := strings.TrimSpace(string(snapshot.Market.Regime))
+	if !snapshot.Market.Evaluated || entryRegime == "" {
+		entryRegime = strings.TrimSpace(draft.Regime)
+	}
 	if len(accepted) > rules.MaxOrders {
 		verdicts = append(verdicts, policy.Verdict{
 			Code: policy.CodeOrderCountCap, Level: policy.LevelAdjust, Scope: policy.ScopeOrder,
@@ -261,17 +267,34 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 				block(&order, verdict)
 				continue
 			}
-			// 置信度定价：模型自己也没把握的建议，凭什么按它要的份额下单。
-			// 位置在单票上限校验之后：先判断"这个目标是否越界"，
-			// 再按置信度打折。反过来的话，25% 的建议打成 17% 就"合法"了。
+			// 定价 = 置信度 × 波动率。两个系数都来自可核对的量：
+			// 置信度是模型自己给的，ATR 是行情给的。
+			// 两个系数都只减不增——系统的职责是把"它自己也没把握的、
+			// 或者波动大到一止损就伤账户的"建议缩小，不是替模型加杠杆。
 			targetWeight := item.TargetWeightPercent
-			if factor, factorNote := confidenceFactor(order.Confidence); factor < 1 {
+			factor := 1.0
+			notes := make([]string, 0, 2)
+			atrApplied := false
+			if f, note := confidenceFactor(order.Confidence); f < 1 {
+				factor *= f
+				notes = append(notes, note)
+			}
+			if f, note := atrSizingFactor(snapshot.ATRs[order.Symbol]); f < 1 {
+				factor *= f
+				atrApplied = true
+				notes = append(notes, note)
+			}
+			if factor < 1 {
 				targetWeight = round2(item.TargetWeightPercent * factor)
+				code := policy.CodeSizingConfidence
+				if atrApplied {
+					code = policy.CodeSizingATR
+				}
 				verdicts = append(verdicts, policy.Verdict{
-					Code: policy.CodeSizingConfidence, Level: policy.LevelAdjust, Scope: policy.ScopeOrder,
+					Code: code, Level: policy.LevelAdjust, Scope: policy.ScopeOrder,
 					Field: field, Symbol: order.Symbol, Metric: item.TargetWeightPercent, Limit: targetWeight,
 					Message: fmt.Sprintf("%s %s，目标权重 %.2f%% → %.2f%%（系数 %.2f）",
-						order.Symbol, factorNote, item.TargetWeightPercent, targetWeight, factor),
+						order.Symbol, strings.Join(notes, "、"), item.TargetWeightPercent, targetWeight, factor),
 				})
 			}
 			amount := equity * targetWeight / 100
@@ -281,12 +304,36 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 			// "原本打算买多少"，否则留下的就是一条"买入 0 股"的无意义记录。
 			order.Quantity = quantity
 			if quantity < lot {
-				block(&order, policy.Verdict{
-					Code: policy.CodeSizingBelowLot, Level: policy.LevelBlock, Scope: policy.ScopeOrder,
-					Field: field, Symbol: order.Symbol, Metric: amount,
-					Message: fmt.Sprintf("%s 目标金额 %.0f 元不足以买入一手（%d 股）", order.Symbol, amount, lot),
-				})
-				continue
+				oneLot := float64(lot) * entry
+				originalAmount := equity * item.TargetWeightPercent / 100
+				// 定价（置信度 × 波动率）把"原本买得起一手"的建议压到不足一手时，
+				// 退到一手而不是直接作废。
+				//
+				// 这不是放宽风控：一手是账户能执行的最小单位，定价的目的是
+				// "别买太多"，不是"别买"。两个系数相乘很容易把小账户上的
+				// 5% 打成 2.2%，而 2.2% 在 30 元的票上就是 74 股——按原来的写法，
+				// 整笔建议消失，计划变成"模型提了、系统什么都没做"。
+				//
+				// 界限很清楚：只有"定价造成的不足一手"才兜底。模型自己只要了
+				// 不到一手的量（originalAmount < oneLot）时不兜底，那是它的判断，
+				// 系统不该替它把仓位放大几倍。
+				if factor < 1 && originalAmount >= oneLot && oneLot <= equity*rules.MaxSingleWeightPercent/100 {
+					quantity = lot
+					order.Quantity = lot
+					verdicts = append(verdicts, policy.Verdict{
+						Code: policy.CodeSizingMinLot, Level: policy.LevelAdjust, Scope: policy.ScopeOrder,
+						Field: field, Symbol: order.Symbol, Metric: amount, Limit: round2(oneLot / equity * 100),
+						Message: fmt.Sprintf("%s 定价后目标金额 %.0f 元不足一手，按最小一手 %d 股执行（约占 %.2f%%）",
+							order.Symbol, amount, lot, oneLot/equity*100),
+					})
+				} else {
+					block(&order, policy.Verdict{
+						Code: policy.CodeSizingBelowLot, Level: policy.LevelBlock, Scope: policy.ScopeOrder,
+						Field: field, Symbol: order.Symbol, Metric: amount,
+						Message: fmt.Sprintf("%s 目标金额 %.0f 元不足以买入一手（%d 股）", order.Symbol, amount, lot),
+					})
+					continue
+				}
 			}
 			notional := float64(quantity) * entry
 			fee := TradeFee(SideBuy, notional)
@@ -341,6 +388,7 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 			}
 			order.Source = OrderSourceModel
 			order.Quantity = quantity
+			order.EntryRegime = entryRegime
 			// 订单上写实际生效的权重，而不是模型原话：界面显示"目标 10%"
 			// 而实际只买了 7%，是最容易让人以为系统算错的一种偏差。
 			order.TargetWeightPercent = targetWeight
@@ -513,27 +561,48 @@ func normalizeExpectedDays(value int) int {
 	return value
 }
 
-// confidenceFactor 把模型自评的置信度换算成仓位系数。
+// confidenceFactor 把模型自评的置信度换算成仓位系数：0.5 + 0.5 × confidence。
 //
-// 只在明显低置信区打折，理由来自这类自评的分布：0.6–0.8 几乎是模型的默认值，
-// 区分度极低；真正有信息量的是"低于 0.5 还硬要买"——那往往意味着它在凑数。
-// 若对所有值都打折，等于给每个建议都施加同一个系数，反而看不出差别。
+// 为什么是线性而不是分档：分档只有"罚/不罚"两态，0.54 与 0.56 会得到 0.9 与 1.0
+// 的断崖，而置信度本身是连续量。线性之后 0.4 给 0.7 额度、0.7 给 0.85、1.0 给满，
+// 既不把低置信一棍打死，也不让 0.9 和 0.55 拿同样的钱。
 //
 // 0 不罚：归一化后 0 表示"模型没填"，而不是"极度不确定"。
 // 把它当极度不确定罚一刀，会让所有省略该字段的旧格式建议被打折，
 // 而复盘时找不到任何解释。
 func confidenceFactor(value float64) (float64, string) {
-	switch {
-	case value <= 0:
-		return 1, ""
-	case value < 0.45:
-		return 0.7, fmt.Sprintf("置信度 %.2f 明显偏低", value)
-	case value < 0.55:
-		return 0.9, fmt.Sprintf("置信度 %.2f 偏低", value)
-	default:
+	if value <= 0 {
 		return 1, ""
 	}
+	if value > 1 {
+		value = 1
+	}
+	return round2(0.5 + 0.5*value), fmt.Sprintf("置信度 %.2f", value)
 }
+
+// atrSizingFactor 把波动率换算成仓位系数：clamp(2.5 / ATR%, 0.55, 1)。
+//
+// 2.5% 是 A 股中等波动票的日 ATR，作为"给满额"的基准。ATR 到 5% 时系数 0.5
+// 被夹到 0.55——同样 10% 止损，高波动票更容易被日常波动打掉，
+// 仓位必须相应缩小，否则"止损很紧、仓位很重"会让一次正常回调变成实质亏损。
+//
+// 上界故意设成 1 而不是 >1：低波动票不加仓。加仓等于系统替模型放大杠杆，
+// 而且会把已经通过单票上限校验的权重推到上限之外。
+func atrSizingFactor(atrPercent float64) (float64, string) {
+	if atrPercent <= atrSizingBaseline {
+		return 1, ""
+	}
+	factor := clampFloat(atrSizingBaseline/atrPercent, atrSizingFloor, 1)
+	return round2(factor), fmt.Sprintf("ATR 占现价 %.2f%%（波动偏大）", atrPercent)
+}
+
+const (
+	// atrSizingBaseline 是"不因波动缩减仓位"的 ATR 基准（百分比）。
+	atrSizingBaseline = 2.5
+	// atrSizingFloor 是波动率定价的下限系数。低于它就不再缩：
+	// 再缩下去一笔正常建议只买一两手，等于用规则否掉了模型的判断。
+	atrSizingFloor = 0.55
+)
 
 // ApplyHorizonDefaults 在裁决之前补齐模型没给的预期天数与失效条件兜底。
 //
