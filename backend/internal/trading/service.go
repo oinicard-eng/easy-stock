@@ -564,6 +564,14 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	rules := RulesForProfile(request.TraderProfile)
 	plan.Rules = rules
 
+	// 总仓位上限在这里定稿一次。提示词、裁决、下单守门三处必须看到同一个数，
+	// 各自现算就会出现"提示词按 55% 劝你减仓、守门按 85% 放行"的错位。
+	// 计算里含同日内只升不降的迟滞，理由见 exposure_ceiling.go。
+	if ceiling := s.exposureCeiling(ctx, accountID, snapshot.Market, rules.MaxTotalExposurePercent, time.Now()); ceiling > 0 {
+		snapshot.ExposureCeiling = ceiling
+		plan.Snapshot.ExposureCeiling = ceiling
+	}
+
 	// 反馈回灌所需的两次查询提前到这里：它们同时参与变化检测。
 	// 如果留到提示词阶段才取，指纹就会漏掉"模型又被同一条规则拦了一次"，
 	// 而那恰恰是最需要再问一次的情形。
@@ -633,7 +641,9 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		Pending:    pending,
 		Blocks:     blocks,
 		Cooldowns:  snapshot.Cooldowns,
-		Memories:   s.MemoriesForPrompt(ctx, accountID, snapshot, time.Now()),
+		// 上限用快照里定稿的那个数，而不是让提示词自己再算一遍。
+		ExposureCeiling: snapshot.ExposureCeiling,
+		Memories:        s.MemoriesForPrompt(ctx, accountID, snapshot, time.Now()),
 		// 校准结论与上一轮调研都取自持久化记录，不放进快照：
 		// 前者每次都能重算，后者只在本轮有效，塞进快照会让计划体积无谓增长。
 		Calibration:   s.calibrationPromptLine(ctx, accountID, time.Now()),
@@ -662,9 +672,47 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		TotalTokens:      result.Usage.TotalTokens,
 		Model:            firstNonEmpty(result.Usage.Model, result.ModelIdentity),
 	}
-	draft, err := ParseDraftPlan(result.Content)
-	if err != nil {
-		return fail(err.Error())
+	draft, parseErr := ParseDraftPlan(result.Content)
+	if parseErr != nil {
+		// 模型偶发不守格式：实测 8 轮里出现过 1 次（约 12.5%），回复是一段
+		// 文字思考，整条里没有 JSON 对象——那轮调研恰好"步数用完、未及收尾"，
+		// 模型顺着半截结论继续往下想，忘了输出计划。
+		//
+		// 整轮作废的代价不只是白跑一分钟：这一轮的机会直接消失，而重试一次
+		// 的成本只有几十秒。重试时把失败原因写进追加要求，比原样重发有效——
+		// 它对同一段上下文会给出同样的偏移，只是多花一次调用。
+		s.logf("event=trading_plan_parse_failed plan=%s err=%v retry=true", planID, parseErr)
+		retryPrompt := prompt + "\n\n## 追加要求（上一次回复不可用）\n" +
+			"你上一条回复不是合法 JSON，程序无法解析：" + parseErr.Error() + "\n" +
+			"请立即重新给出结论。只输出一个 JSON 对象，第一个字符必须是 {，最后一个字符必须是 }；\n" +
+			"不要输出任何解释、思考过程或 Markdown 代码块。\n"
+		retryStarted := time.Now()
+		retried, retryErr := agent.PromptUsingOptions(ctx, s.gateway, retryPrompt, agent.PromptOptions{
+			Sandbox:              true,
+			AutoApprove:          true,
+			DisableTools:         true,
+			FirstResponseTimeout: 100 * time.Second,
+			IdleTimeout:          150 * time.Second,
+			MaxAttempts:          2,
+		})
+		if retryErr != nil {
+			s.logf("event=trading_plan_retry_call_failed plan=%s err=%v", planID, retryErr)
+		} else {
+			// 两次调用的耗时与 token 都要累加：只记第一次会让成本统计
+			// 恰好漏掉最贵的那类轮次。
+			modelRun.LatencyMS += time.Since(retryStarted).Milliseconds()
+			modelRun.PromptTokens += retried.Usage.PromptTokens
+			modelRun.CompletionTokens += retried.Usage.CompletionTokens
+			modelRun.TotalTokens += retried.Usage.TotalTokens
+			modelRun.ContentChars += len([]rune(retried.Content))
+			draft, parseErr = ParseDraftPlan(retried.Content)
+			if parseErr == nil {
+				s.logf("event=trading_plan_parse_recovered plan=%s", planID)
+			}
+		}
+	}
+	if parseErr != nil {
+		return fail(parseErr.Error())
 	}
 	// 波动率校正先于预期天数补齐：补失效条件时会参考止损价，
 	// 顺序反了会把失效条件对齐到一个马上要被改掉的价位上。

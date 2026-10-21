@@ -351,7 +351,9 @@ func measureExposure(snapshot Snapshot, orders []Order, rules RiskRules) Exposur
 		exposure.CashPercent = round2((snapshot.AvailableCash() + exposure.SellNotional - exposure.BuyNotional) / equity * 100)
 	}
 	exposure.BudgetPercent = rules.MaxTotalExposurePercent
-	if snapshot.Market.Evaluated {
+	if snapshot.ExposureCeiling > 0 {
+		exposure.BudgetPercent = snapshot.ExposureCeiling
+	} else if snapshot.Market.Evaluated {
 		exposure.BudgetPercent = snapshot.Market.MaxExposurePercent(rules.MaxTotalExposurePercent)
 	}
 	exposure.Sectors = sectorExposure(snapshot, orders, equity)

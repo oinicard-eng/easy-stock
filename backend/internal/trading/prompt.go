@@ -62,6 +62,9 @@ type PlanPromptInput struct {
 	// PlanDiff 是上一轮候选池与本轮的差异（谁消失、谁新增、上一轮建议过的票还在不在）。
 	// 与 Blocks 的分工：Blocks 说"你的想法被否了"，PlanDiff 说"世界变了多少"。
 	PlanDiff []string
+	// ExposureCeiling 是本轮生效的总仓位上限，已含市场预算、风控上限与
+	// 当日迟滞。为 0 时按 Market 现算（沙盘回放老快照）。
+	ExposureCeiling float64
 }
 
 // BlockedIntent 是一条被拦下的建议。它保留模型的原始意图（想买多少、什么价位），
@@ -87,11 +90,15 @@ type BlockedIntent struct {
 // 模型不允许引入快照之外的标的或价格。
 func BuildPlanPrompt(input PlanPromptInput) string {
 	rules := input.Rules.Normalize()
-	// 总仓位上限取市场预算与风控上限的较小值：市场不好时以市场为准，
-	// 但风控阈值永远不能被市场判断放宽。
-	exposureLimit := rules.MaxTotalExposurePercent
-	if input.Market.Evaluated {
-		exposureLimit = input.Market.MaxExposurePercent(rules.MaxTotalExposurePercent)
+	// 总仓位上限优先取调用方定稿的值：它已经含了市场预算、风控上限与
+	// 当日迟滞，并且与裁决、守门看到的是同一个数。为 0 才现算
+	// （沙盘回放老快照时没有这个字段）。
+	exposureLimit := input.ExposureCeiling
+	if exposureLimit <= 0 {
+		exposureLimit = rules.MaxTotalExposurePercent
+		if input.Market.Evaluated {
+			exposureLimit = input.Market.MaxExposurePercent(rules.MaxTotalExposurePercent)
+		}
 	}
 	var builder strings.Builder
 
@@ -110,13 +117,35 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	builder.WriteString("   目标权重只是上限，实际额度 = 目标 × (0.5 + 0.5 × confidence) × 波动率系数；\n")
 	builder.WriteString("   波动率系数 = clamp(2.5 / ATR占现价%, 0.55, 1)，只减不增。confidence 写 0.9 与写 0.5，\n")
 	builder.WriteString("   拿到的钱相差两成以上；用不准的自信去换额度，只会让自己的建议被系统压小。\n")
-	fmt.Fprintf(&builder, "6. 买入后现金占比不得低于 %.1f%%，总仓位不得高于 %.1f%%。\n", rules.MinCashPercent, exposureLimit)
+	fmt.Fprintf(&builder, "6. 买入后现金占比不得低于 %.1f%%，买入后总仓位不得高于 %.1f%%——这条约束的是**新增买入**，系统超限时会把买单缩到 0，不要求你卖出存量。\n", rules.MinCashPercent, exposureLimit)
+	// 存量超限时把话说明白。此前只给一个"上限 55%"，而账户已有 76%，
+	// 模型读到就认为"我超了，得减"，于是为凑指标去卖刚建一天的仓位，
+	// 把浮亏变成实亏。风控指标的意义是限制加仓，不是替代止损判断。
+	if input.Account.Equity > 0 {
+		held := 0.0
+		for _, position := range input.Positions {
+			held += position.MarketValue
+		}
+		if heldPercent := held / input.Account.Equity * 100; heldPercent > exposureLimit+0.01 {
+			fmt.Fprintf(&builder, "   **当前持仓已占 %.2f%%，高于本轮上限 %.2f%%。这个差额不构成卖出理由。**\n", heldPercent, exposureLimit)
+			builder.WriteString("   只有当你认为某只票的买入逻辑已经破了才卖它；不要为了把仓位数字凑回上限而卖出——\n")
+			builder.WriteString("   让一条仓位指标替你决定止损，通常正好卖在最低点，还要再付一次价差与手续费。\n")
+			// 光说"不许为凑指标卖"还不够：账户状态里写着可用资金几万元，
+			// 模型会以为那笔钱能用来建新仓，于是给出买单、再被系统全部取消。
+			// 把"本轮新增买入额度为 0"直接说死，模型才不会浪费一轮去试。
+			builder.WriteString("   同时，**本轮新增买入额度为 0 元**：任何买单都会被系统按仓位上限取消。若看好新标的，\n")
+			builder.WriteString("   只能通过卖出你认为逻辑已破的持仓来腾额度，不要指望现金。\n")
+		}
+	}
 	fmt.Fprintf(&builder, "7. 同一标的只能出现一次；卖出只能针对已有持仓，且不超过可卖数量。\n")
 	fmt.Fprintf(&builder, "8. 单笔止损触发时的账户亏损不得超过总资产的 %.1f%%。\n", rules.MaxRiskPerTradePercent)
 	// 行业上限必须先告诉模型，再在守卫里强制。只说给守卫听，模型会给出一半被拦的计划，
 	// 用户看到的是"模型很积极、系统总在否决"，两头都不满意。
 	fmt.Fprintf(&builder, "9. 同一行业（按大类归并）合计权重不超过 %.1f%%，同一行业最多持有 %d 只；\n",
 		rules.MaxSectorWeightPercent, rules.MaxSectorNames)
+	// 只数上限也要先说：不说的话，模型会继续往已经很长的持仓列表里塞票，
+	// 然后看着它们的建议被逐条拦掉，误以为系统在否定它的判断。
+	fmt.Fprintf(&builder, "   整个组合最多持有 %d 只（含在途挂单）：已经够数时不要再提议新标的，只允许对已持有的标的加仓；\n", rules.MaxPositions)
 	fmt.Fprintf(&builder, "10. 如果证据不足或没有值得交易的机会，orders 返回空数组，并在 summary 中说明原因。\n")
 	// 这条来自真实浪费：模型连续两轮给出 688 开头的标的，而科创板一手 200 股，
 	// 目标金额买不起一手，两笔建议全部在 sizing.below_lot 被拒。

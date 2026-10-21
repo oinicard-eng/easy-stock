@@ -137,7 +137,10 @@ func TestCooldownWindowSkipsLunchBreakAndWeekend(t *testing.T) {
 	}
 }
 
-func TestCooldownIgnoresTakeProfit(t *testing.T) {
+// 止盈离场不产生"止损冷静期"——兑现利润不代表判断错了，不该按止损对待。
+// 但"当日卖出即当日不再买回"这条与离场原因无关：一天之内在同一只票上
+// 卖出又买回，本身就是判断在两小时内翻转，与赚没赚到钱无关。
+func TestCooldownAfterTakeProfitBansSameDayRebuyOnly(t *testing.T) {
 	store := newCooldownStore(t)
 	now := time.Now()
 	insertClosedTrade(t, store, ClosedTrade{
@@ -149,8 +152,94 @@ func TestCooldownIgnoresTakeProfit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("推导冷静期失败：%v", err)
 	}
-	if _, ok := view.Symbols["600000.SH"]; ok {
-		t.Fatal("止盈离场后不该冷却：兑现利润不代表判断错了")
+	cooldown, ok := view.Symbols["600000.SH"]
+	if !ok {
+		t.Fatal("止盈当日卖出后，当日仍应禁止买回同一标的")
+	}
+	if cooldown.Trigger != TriggerTakeProfit {
+		t.Fatalf("冷却原因应为止盈本身，实际为 %q", cooldown.Trigger)
+	}
+	// 解禁时刻必须是次日开盘，而不是"4 小时交易时间"——后者正是止损冷静期的口径。
+	if want := nextTradingDayOpen(now); !cooldown.Until.Equal(want) {
+		t.Fatalf("解禁时刻应为次日开盘 %s，实际 %s", want.Format(time.RFC3339), cooldown.Until.Format(time.RFC3339))
+	}
+}
+
+// 埃夫特那次实测的回归：model_exit 清仓后，当日不得再买回。
+// 原实现只认止损类离场，这条完全绕过去了。
+func TestCooldownBansSameDayRebuyAfterModelExit(t *testing.T) {
+	store := newCooldownStore(t)
+	closedAt := cooldownCST(10, 0, 0)
+	now := cooldownCST(10, 20, 0)
+	insertClosedTrade(t, store, ClosedTrade{
+		AccountID: DefaultAccountID, Symbol: "688165.SH", Name: "埃夫特", Sector: "机械",
+		Trigger: TriggerModelExit, PnLPercent: -1.43,
+		TradingDay: TradingDay(closedAt), ClosedAt: closedAt,
+	})
+	view, err := store.BuildCooldowns(context.Background(), DefaultAccountID, DefaultCooldownRule(), now)
+	if err != nil {
+		t.Fatalf("推导冷静期失败：%v", err)
+	}
+	verdict, ok := view.Block("688165.SH", "机械", now)
+	if ok {
+		t.Fatal("模型主动离场后 20 分钟又允许买回同一标的，日内反复进出没有被拦住")
+	}
+	if verdict.Code != policy.CodeRiskCooldownSymbol {
+		t.Fatalf("拦截码应为 %s，实际 %s", policy.CodeRiskCooldownSymbol, verdict.Code)
+	}
+
+	// 次日开盘解禁：给模型一整晚重新判断，而不是 4 小时后立刻能买回。
+	next := nextTradingDayOpen(now).Add(time.Minute)
+	if _, passed := view.Block("688165.SH", "机械", next); !passed {
+		t.Fatal("次日开盘后应已解禁")
+	}
+}
+
+// 当日禁买与止损冷静期同时命中时，取较晚的解禁时刻。
+// 周五上午止损：止损窗口跨周末到周一，比"次日开盘"更晚，必须保留前者。
+func TestCooldownKeepsLaterOfSameDayBanAndStopWindow(t *testing.T) {
+	store := newCooldownStore(t)
+	closedAt := cooldownCST(10, 0, 0)
+	now := cooldownCST(10, 30, 0)
+	insertClosedTrade(t, store, ClosedTrade{
+		AccountID: DefaultAccountID, Symbol: "600000.SH", Sector: "银行",
+		Trigger: TriggerStopLoss, PnLPercent: -6.2,
+		TradingDay: TradingDay(closedAt), ClosedAt: closedAt,
+	})
+	view, err := store.BuildCooldowns(context.Background(), DefaultAccountID, DefaultCooldownRule(), now)
+	if err != nil {
+		t.Fatalf("推导冷静期失败：%v", err)
+	}
+	cooldown, ok := view.Symbols["600000.SH"]
+	if !ok {
+		t.Fatal("止损后应有禁买约束")
+	}
+	stopUntil := addTradingHours(closedAt, DefaultCooldownRule().SymbolHours)
+	if cooldown.Until.Before(stopUntil) {
+		t.Fatalf("解禁时刻取早了：止损窗口到 %s，实际登记 %s——冷静期被当日禁买规则覆盖掉了一部分",
+			stopUntil.Format(time.RFC3339), cooldown.Until.Format(time.RFC3339))
+	}
+}
+
+// AllowSameDayRebuy 保留为可配置项：确认它确实能关掉，
+// 而不是写死了一条无法回滚的规则。
+func TestCooldownSameDayRebuyCanBeAllowed(t *testing.T) {
+	store := newCooldownStore(t)
+	closedAt := cooldownCST(10, 0, 0)
+	now := cooldownCST(10, 20, 0)
+	insertClosedTrade(t, store, ClosedTrade{
+		AccountID: DefaultAccountID, Symbol: "688165.SH", Sector: "机械",
+		Trigger: TriggerModelExit, PnLPercent: -1.43,
+		TradingDay: TradingDay(closedAt), ClosedAt: closedAt,
+	})
+	rule := DefaultCooldownRule()
+	rule.AllowSameDayRebuy = true
+	view, err := store.BuildCooldowns(context.Background(), DefaultAccountID, rule, now)
+	if err != nil {
+		t.Fatalf("推导冷静期失败：%v", err)
+	}
+	if _, ok := view.Symbols["688165.SH"]; ok {
+		t.Fatal("显式允许当日买回时不该产生约束")
 	}
 }
 

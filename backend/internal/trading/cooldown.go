@@ -6,9 +6,11 @@ package trading
 // 现价刚好比成本低一点，模型会给出"回调到位、可以再进"的建议。守卫能拦的只有
 // 单票上限与行业上限，都拦不住"同一个坑赔两次"——因为第二次买的时候，仓位是空的。
 //
-// 两条规则，都由已发生的事实推导，不依赖模型自述：
+// 三条规则，都由已发生的事实推导，不依赖模型自述：
 //  1. 标的级：任一持仓因止损类原因清仓后的 4 小时内，不得再买入同一标的。
-//  2. 板块级：同一行业当日累计 2 次止损后，当日不得再买入该行业任何标的。
+//  2. 标的级（当日）：任一标的一旦在当日被清仓，当日剩余时间不得再买入同一标的
+//     ——不区分离场原因。见下方 AllowSameDayRebuy 的说明。
+//  3. 板块级：同一行业当日累计 2 次止损后，当日不得再买入该行业任何标的。
 //
 // 为什么是"推导"而不是"另建一张表"：平仓记录已经完整记下了时间、标的、行业与原因。
 // 再存一份就等于有两个真相来源，某一天它们对不上时，没人知道该信哪一个。
@@ -32,11 +34,29 @@ type CooldownRule struct {
 	SymbolHours float64
 	// SectorLossesPerDay 是同一行业当日止损次数上限。达到即当日禁买该行业。
 	SectorLossesPerDay int
+	// AllowSameDayRebuy 允许"当日卖出、当日买回同一标的"。
+	//
+	// 零值 false 即**禁止**，这是刻意的安全默认。
+	//
+	// 触发这条规则的是一个实测出来的坑：688165.SH 在一个上午被买入三次、
+	// 卖出三次，三段分别亏 -75.96 / -50.47 / -48.47，合计 -174.9 元，
+	// 占当日总亏损的 15%。三次离场原因全是 model_exit（模型主动离场），
+	// 而原来的冷静期只认止损类离场，于是每次卖完下一轮又可以在候选池里
+	// 看到这只票、又买回去——每一轮都付一次价差与手续费。
+	//
+	// 为什么不止于止损：日内反复进出同一标的，无论第一次离场的理由是什么，
+	// 都说明"对这个标的的判断在一小时内翻转了"。A 股 T+1 之下，卖出之后
+	// 无论如何都要到次日才能再卖，当日买回等于自愿承担隔夜风险却拿不到
+	// 任何额外信息。要买回，等第二天开盘——那时判断有了一整晚的冷静期。
+	//
+	// 为什么不影响正常调仓：这条只约束"卖出后买回同一只"。卖 A 买 B 的
+	// 换股不受任何影响，部分卖出（仍有持仓）也不产生平仓记录、不触发。
+	AllowSameDayRebuy bool
 }
 
 // DefaultCooldownRule 返回默认参数。
 func DefaultCooldownRule() CooldownRule {
-	return CooldownRule{SymbolHours: 4, SectorLossesPerDay: 2}
+	return CooldownRule{SymbolHours: 4, SectorLossesPerDay: 2, AllowSameDayRebuy: false}
 }
 
 func (r CooldownRule) normalize() CooldownRule {
@@ -123,6 +143,19 @@ func (s *Store) BuildCooldowns(ctx context.Context, accountID string, rule Coold
 		if err := json.Unmarshal([]byte(payload), &trade); err != nil {
 			continue
 		}
+		// 当日清仓即当日禁买。这条不区分离场原因，所以必须放在 stopTrigger
+		// 过滤之前——否则模型主动离场（model_exit）就完全绕过了它，
+		// 而实测里反复进出的正是这种。
+		if !rule.AllowSameDayRebuy && trade.TradingDay == day {
+			until := nextTradingDayOpen(now)
+			if now.Before(until) {
+				raiseSymbolCooldown(view, trade.Symbol, until, trade.Trigger, fmt.Sprintf(
+					"%s 今日 %s 已%s离场（%+.2f%%），当日不再买入同一标的，%s 开盘后可重新评估",
+					trade.Symbol, trade.ClosedAt.In(cstZone()).Format("15:04"),
+					triggerLabel(trade.Trigger), trade.PnLPercent,
+					until.In(cstZone()).Format("01-02")))
+			}
+		}
 		if !stopTrigger(trade.Trigger) {
 			continue
 		}
@@ -131,16 +164,10 @@ func (s *Store) BuildCooldowns(ctx context.Context, accountID string, rule Coold
 		// 否则"4 小时"在跨午休时实际只冷却约 3 小时。
 		until := addTradingHours(trade.ClosedAt, rule.SymbolHours)
 		if now.Before(until) {
-			if existing, ok := view.Symbols[trade.Symbol]; !ok || existing.Until.Before(until) {
-				view.Symbols[trade.Symbol] = Cooldown{
-					Symbol:  trade.Symbol,
-					Until:   until,
-					Trigger: trade.Trigger,
-					Reason: fmt.Sprintf("%s 于 %s 因%s离场（%.2f%%），%s 前不再买入同一标的",
-						trade.Symbol, trade.ClosedAt.In(cstZone()).Format("01-02 15:04"),
-						triggerLabel(trade.Trigger), trade.PnLPercent, until.In(cstZone()).Format("01-02 15:04")),
-				}
-			}
+			raiseSymbolCooldown(view, trade.Symbol, until, trade.Trigger, fmt.Sprintf(
+				"%s 于 %s 因%s离场（%.2f%%），%s 前不再买入同一标的",
+				trade.Symbol, trade.ClosedAt.In(cstZone()).Format("01-02 15:04"),
+				triggerLabel(trade.Trigger), trade.PnLPercent, until.In(cstZone()).Format("01-02 15:04")))
 		}
 		// 板块级：只统计当日的止损次数。
 		if trade.TradingDay != day || strings.TrimSpace(trade.Sector) == "" {
@@ -170,6 +197,18 @@ func (s *Store) BuildCooldowns(ctx context.Context, accountID string, rule Coold
 		}
 	}
 	return view, nil
+}
+
+// raiseSymbolCooldown 为同一标的登记一条禁买约束，保留更晚的解禁时刻。
+//
+// 同一标的当日可能同时命中"当日清仓禁买"与"止损后 4 小时冷静期"：
+// 周五上午止损时后者跨周末、解禁时刻更晚，而下午止损时前者更晚。
+// 取较晚者才对——取较早者会让其中一条保护静默失效。
+func raiseSymbolCooldown(view CooldownView, symbol string, until time.Time, trigger, reason string) {
+	if existing, ok := view.Symbols[symbol]; ok && !existing.Until.Before(until) {
+		return
+	}
+	view.Symbols[symbol] = Cooldown{Symbol: symbol, Until: until, Trigger: trigger, Reason: reason}
 }
 
 // sessionCloseOf 返回当天 15:00（北京时间）。收盘后才止损的记录不再产生板块约束，

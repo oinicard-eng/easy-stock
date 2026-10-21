@@ -116,3 +116,42 @@ func TestCheckTradeRiskAndCashFloor(t *testing.T) {
 		t.Fatal("现金 30% 不应触发底线")
 	}
 }
+
+// 只数上限：二十来只票、每只三四个点，既摊平了收益又要为每只付一次最低佣金。
+// 这条只拦"开新标的"，不能拦"已持有标的加仓"——前者是稀释，后者是集中。
+func TestBookBlocksNewNameAtPositionLimit(t *testing.T) {
+	limits := Default()
+	limits.MaxPositions = 3
+	book := NewBook(100000, limits)
+	book.Seed("600001.SH", "电子", 10)
+	book.Seed("600002.SH", "医药", 10)
+	book.Seed("600003.SH", "金融", 10)
+
+	verdict, ok := book.TryBuy("600004.SH", "汽车", 5)
+	if ok {
+		t.Fatal("已满 3 只时开第 4 只新标的应被拦")
+	}
+	if verdict.Code != CodeRiskPositionCount || verdict.Metric != 3 || verdict.Limit != 3 {
+		t.Fatalf("裁决异常：%+v", verdict)
+	}
+	// 已持有的标的加仓不受只数上限约束。
+	if _, ok := book.TryBuy("600001.SH", "电子", 5); !ok {
+		t.Fatal("已持有标的加仓不该被只数上限拦住")
+	}
+	// 被拒的新标的不能占住名字：账本只数应仍为 3。
+	if book.Exposure() == 0 {
+		t.Fatal("组合暴露不应归零")
+	}
+}
+
+func TestLimitsNormalizeKeepsPositionLimit(t *testing.T) {
+	if got := (Limits{MaxPositions: 0}).Normalize().MaxPositions; got != 20 {
+		t.Fatalf("只数上限缺失时应回落到 20，实际 %d", got)
+	}
+	if got := (Limits{MaxPositions: 500}).Normalize().MaxPositions; got != 20 {
+		t.Fatalf("只数上限越界时应回落到 20，实际 %d", got)
+	}
+	if got := (Limits{MaxPositions: 8}).Normalize().MaxPositions; got != 8 {
+		t.Fatalf("合法只数上限应保留，实际 %d", got)
+	}
+}

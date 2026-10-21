@@ -449,8 +449,12 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 	// 而模型并不总是守：它会给出合计 120% 的目标权重。若放任到下单阶段，
 	// 资金不足会让靠前的几笔占满额度、后面的被逐笔缩减，相对权重被扭曲成"先到先得"。
 	// 因此超出上限时按统一比例缩放全部买入，保持模型给出的相对权重不变。
+	// 上限优先取快照里定稿的那个数：它含市场预算、风控上限与当日迟滞，
+	// 与提示词、裁决完全一致。快照没有该字段（回放老计划）才现算。
 	exposureLimit := rules.MaxTotalExposurePercent
-	if snapshot.Market.Evaluated {
+	if snapshot.ExposureCeiling > 0 {
+		exposureLimit = snapshot.ExposureCeiling
+	} else if snapshot.Market.Evaluated {
 		// 市场预算只能收紧，不能放宽风控阈值。
 		exposureLimit = snapshot.Market.MaxExposurePercent(rules.MaxTotalExposurePercent)
 	}

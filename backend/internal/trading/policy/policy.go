@@ -80,6 +80,11 @@ const (
 	CodeRiskSingleName      = "risk.single_name"
 	CodeRiskSectorWeight    = "risk.sector_weight"
 	CodeRiskSectorNameCount = "risk.sector_name_count"
+	// CodeRiskPositionCount 表示持仓只数已达上限，不能再开新标的。
+	// 与 sector_name_count 的区别：后者是"同一行业塞太多只票"，
+	// 前者是"整个组合摊得太薄"——二十来只票、每只三四个点，
+	// 收益被摊平，佣金与价差却一笔不少。
+	CodeRiskPositionCount   = "risk.position_count"
 	CodeRiskStopLossMissing = "risk.stop_loss_missing"
 	CodeRiskStopLossInvalid = "risk.stop_loss_invalid"
 	CodeRiskStopLossWide    = "risk.stop_loss_wide"
@@ -168,6 +173,13 @@ type Limits struct {
 	BoardLot                int     `json:"board_lot"`
 	MaxSectorWeightPercent  float64 `json:"max_sector_weight_percent"`
 	MaxSectorNames          int     `json:"max_sector_names"`
+	// MaxPositions 是整个组合的持仓只数上限（含在途挂单）。
+	//
+	// 这一条补的是"分散没有上限"的坑：单票 20%、行业 45% 管住了集中度，
+	// 却没人管"一共能摊多少只"。实测账户在一个上午累到 21 只、单只约 3.5%，
+	// 结果是每只票的涨跌都被摊成噪音，而每笔买卖的佣金照付；
+	// 更贵的是复核成本——每轮要给 21 条失效条件各判一次。
+	MaxPositions int `json:"max_positions"`
 }
 
 // Default 是基准阈值。
@@ -182,6 +194,7 @@ func Default() Limits {
 		BoardLot:                100,
 		MaxSectorWeightPercent:  45,
 		MaxSectorNames:          3,
+		MaxPositions:            20,
 	}
 }
 
@@ -215,6 +228,9 @@ func (l Limits) Normalize() Limits {
 	}
 	if l.MaxSectorNames <= 0 {
 		l.MaxSectorNames = defaults.MaxSectorNames
+	}
+	if l.MaxPositions <= 0 || l.MaxPositions > 100 {
+		l.MaxPositions = defaults.MaxPositions
 	}
 	return l
 }
@@ -274,6 +290,19 @@ func (b *Book) TryBuy(symbol, sector string, weight float64) (Verdict, bool) {
 		return Verdict{}, true
 	}
 	sector = strings.TrimSpace(sector)
+	// 只数上限只拦"开一个新标的"：已计入的标的再加仓不受这条约束。
+	// 拦加仓会把"看好某只票想加大仓位"和"再摊一只新票"当成同一件事，
+	// 而前者是集中、后者是稀释，方向正好相反。
+	if b.limits.MaxPositions > 0 {
+		if _, held := b.symbolW[symbol]; !held && len(b.symbolW) >= b.limits.MaxPositions {
+			return Verdict{
+				Code: CodeRiskPositionCount, Level: LevelBlock, Scope: ScopePortfolio, Symbol: symbol,
+				Message: fmt.Sprintf("组合已持有/在途 %d 只，达到只数上限 %d；再开新标的只会把仓位摊得更薄",
+					len(b.symbolW), b.limits.MaxPositions),
+				Metric: float64(len(b.symbolW)), Limit: float64(b.limits.MaxPositions),
+			}, false
+		}
+	}
 	combined := round2(b.symbolW[symbol] + weight)
 	if b.limits.MaxSingleWeightPercent > 0 && combined > b.limits.MaxSingleWeightPercent {
 		return Verdict{

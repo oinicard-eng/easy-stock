@@ -370,6 +370,12 @@ func triggerLabel(trigger string) string {
 		return "失效条件"
 	case trigger == TriggerTimeStop:
 		return "时间止损"
+	case trigger == TriggerModelExit:
+		// 当日禁买规则会把 model_exit 写进拦截提示语，这里必须有中文，
+		// 否则提示词里会出现"已model_exit离场"这种半截英文。
+		return "模型主动"
+	case trigger == TriggerManualExit:
+		return "人工"
 	case strings.HasPrefix(trigger, TriggerTakeProfit):
 		return "止盈"
 	default:

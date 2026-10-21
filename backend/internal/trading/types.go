@@ -342,6 +342,11 @@ type Snapshot struct {
 	// 数据源未配置或取数失败都要与"资金未转负"严格区分。
 	// 只在持仓带板块失效条件时才取数，普通轮次不多花这个请求。
 	SectorFlows map[string]float64 `json:"sector_flows,omitempty"`
+	// ExposureCeiling 是本轮实际生效的总仓位上限（百分比）。
+	// 它已经含了"市场预算与风控上限取较小值"，并叠加了同日内只升不降的
+	// 迟滞（见 exposure_ceiling.go）。为 0 表示未计算，消费方退回按
+	// Market.MaxExposurePercent 现算——沙盘回放老快照时会走到这条路径。
+	ExposureCeiling float64 `json:"exposure_ceiling,omitempty"`
 }
 
 // AvailableCash 返回快照时刻真正可用于新开仓的资金。

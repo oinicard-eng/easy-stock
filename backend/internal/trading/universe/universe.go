@@ -147,7 +147,7 @@ func Build(entries []foundation.StockCatalogEntry, market cognition.MarketView, 
 	}
 
 	board := Board{
-		TakenAt: time.Now().UTC(),
+		TakenAt:     time.Now().UTC(),
 		SourceCount: len(entries),
 		Market:      market,
 		// 无候选也要是空数组而不是 null：前端会对 candidates.length 取值，
