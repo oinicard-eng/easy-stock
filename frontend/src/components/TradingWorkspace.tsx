@@ -1,6 +1,7 @@
 import {
 	Activity,
 	AlertTriangle,
+	Banknote,
 	BellRing,
 	Brain,
 	CalendarClock,
@@ -12,6 +13,7 @@ import {
 	GitCompareArrows,
 	History,
 	LoaderCircle,
+	PieChart,
 	Play,
 	PowerCircle,
 	RefreshCw,
@@ -1396,11 +1398,40 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 								<strong>{health ? healthLabel(health.status) : '—'}</strong>
 								<em>{health ? `${health.positions} 只持仓 · ${health.open_orders} 笔挂单` : '等待读取'}</em>
 							</button>
-							<button type="button" className={`trading-status-tile ${gateTone === 'normal' ? 'ok' : gateTone === 'pause' ? 'warn' : 'bad'}`} onClick={() => selectTradingView('overview')}>
+							{/* 门控格不是跳转入口而是操作入口：状态和总闸放在同一格，
+							    避免页面上出现两处写着「正常运行」的地方。 */}
+							<div
+								className={`trading-status-tile gate ${gateTone}`}
+								title={account?.control.kill_switch
+									? '不生成新计划，任何挂单都不会成交；已有挂单保留，可撤销。'
+									: account?.control.pause_buying
+										? '只停新增买入，卖出与减仓照常执行。'
+										: '门控放行。全自动执行上线后，这里是唯一的人工总闸。'}
+							>
 								<span>交易门控</span>
 								<strong>{controlGateText(account?.control)}</strong>
-								<em>{account?.control.kill_switch ? '不会生成也不成交' : account?.control.pause_buying ? '只停新增买入' : '放行，按规则执行'}</em>
-							</button>
+								<div className="trading-gate-actions">
+									<button
+										type="button"
+										className="trading-ghost"
+										onClick={() => void handleControl({ pause_buying: !account?.control.pause_buying })}
+										disabled={controlBusy || !account || account.control.kill_switch}
+									>
+										{account?.control.pause_buying && !account?.control.kill_switch ? '恢复买入' : '暂停买入'}
+									</button>
+									<button
+										type="button"
+										className={`trading-ghost ${account?.control.kill_switch ? 'danger active' : 'danger'}`}
+										onClick={() => void handleControl({ kill_switch: !account?.control.kill_switch })}
+										disabled={controlBusy || !account}
+									>
+										{account?.control.kill_switch ? '解除停止' : '全部停止'}
+									</button>
+									<button type="button" className="trading-link" onClick={() => void handleReconcile()} disabled={reconciling || !account}>
+										{reconciling ? '对账中…' : '对账'}
+									</button>
+								</div>
+							</div>
 						</div>
 
 						<section className="trading-attention">
@@ -1424,57 +1455,16 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							)}
 						</section>
 
-						<div
-							className={`trading-control ${
-								account?.control.kill_switch ? 'halt' : account?.control.pause_buying ? 'pause' : 'normal'
-							}`}
-						>
-							<div className="trading-control-state">
-								<PowerCircle size={18} />
-								<div>
-									<strong>{controlGateText(account?.control)}</strong>
-									<span>
-										{account?.control.kill_switch
-											? '不生成新计划，任何挂单都不会成交；已有挂单保留，可撤销。'
-											: account?.control.pause_buying
-												? '只停新增买入，卖出与减仓照常执行。'
-												: '门控放行。全自动执行上线后，这里是唯一的人工总闸。'}
-									</span>
-								</div>
-							</div>
-							<div className="trading-control-actions">
-								<button
-									type="button"
-									className={`trading-ghost ${account?.control.pause_buying && !account?.control.kill_switch ? 'active' : ''}`}
-									onClick={() => void handleControl({ pause_buying: !account?.control.pause_buying })}
-									disabled={controlBusy || !account || account.control.kill_switch}
-								>
-									{account?.control.pause_buying && !account?.control.kill_switch ? '恢复买入' : '暂停买入'}
-								</button>
-								<button
-									type="button"
-									className={`trading-ghost ${account?.control.kill_switch ? 'danger active' : 'danger'}`}
-									onClick={() => void handleControl({ kill_switch: !account?.control.kill_switch })}
-									disabled={controlBusy || !account}
-								>
-									{account?.control.kill_switch ? '解除停止' : '全部停止'}
-								</button>
-								<button type="button" className="trading-ghost" onClick={() => void handleReconcile()} disabled={reconciling || !account}>
-									{reconciling ? <LoaderCircle size={14} className="spin" /> : <Scale size={14} />} 对账
-								</button>
-							</div>
-						</div>
-
 						<div className="trading-summary">
 							<article>
-								<span>总资产</span>
+								<header><Wallet size={15} /><span>总资产</span></header>
 								<strong>{account ? `¥ ${formatMoney(account.account.equity)}` : '—'}</strong>
 								<em className={returnPercent >= 0 ? 'up' : 'down'}>
 									{account ? `${returnPercent >= 0 ? '+' : ''}${returnPercent.toFixed(2)}%` : '—'}
 								</em>
 							</article>
 							<article>
-								<span>可用资金</span>
+								<header><Banknote size={15} /><span>可用资金</span></header>
 								<strong>{account ? `¥ ${formatMoney(availableCash(account.account))}` : '—'}</strong>
 								<em>
 									{account && account.account.reserved_cash > 0
@@ -1483,12 +1473,12 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 								</em>
 							</article>
 							<article>
-								<span>持仓市值</span>
+								<header><PieChart size={15} /><span>持仓市值</span></header>
 								<strong>{account ? `¥ ${formatMoney(account.account.market_value)}` : '—'}</strong>
 								<em>{account?.positions?.length ?? 0} 只标的</em>
 							</article>
 							<article>
-								<span>浮动盈亏</span>
+								<header><TrendingUp size={15} /><span>浮动盈亏</span></header>
 								<strong className={unrealized >= 0 ? 'up' : 'down'}>{`${unrealized >= 0 ? '+' : ''}${formatMoney(unrealized)}`}</strong>
 								<em>
 									{account?.account.pnl
@@ -1709,32 +1699,31 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 														</td>
 														<td>{position.average_cost.toFixed(3)}</td>
 														<td>{position.last_price.toFixed(2)}</td>
-														<td className={profitPercent >= 0 ? 'up' : 'down'}>
-															{position.unrealized_pnl >= 0 ? '+' : ''}{formatMoney(position.unrealized_pnl)}
-															<span className="trading-subtle">{profitPercent >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%</span>
+														<td className={`trading-pnl-cell ${profitPercent >= 0 ? 'up' : 'down'}`}>
+															<strong>{position.unrealized_pnl >= 0 ? '+' : ''}{formatMoney(position.unrealized_pnl)}</strong>
+															<span>{profitPercent >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%</span>
 														</td>
 														<td>
-															{position.stop_loss_price ? <span className="trading-line stop">{position.stop_loss_price.toFixed(2)}</span> : <span className="trading-line none">未设止损</span>}
-															{position.take_profit_price ? <span className="trading-line take">{position.take_profit_price.toFixed(2)}</span> : null}
-															{(position.reduce_count ?? 0) > 0 && <span className="trading-subtle">已止盈 {position.reduce_count} 级</span>}
+															<div className="trading-defense">
+																{position.stop_loss_price ? <span className="trading-line stop" title="止损">止损 {position.stop_loss_price.toFixed(2)}</span> : <span className="trading-line none">未设止损</span>}
+																{position.take_profit_price ? <span className="trading-line take" title="止盈">止盈 {position.take_profit_price.toFixed(2)}</span> : null}
+															</div>
 															{/* 失效条件与预期期限写在持仓上：它们是「这笔单什么时候算错」的承诺，
 															    比止损更容易被遗忘，因为它不是一个价格。 */}
-															{position.invalidation_rule?.price_below || position.invalidation ? (
-																<span className="trading-subtle" title={position.invalidation ?? ''}>
-																	失效 {position.invalidation_rule?.price_below ? `跌破 ${position.invalidation_rule.price_below.toFixed(2)}` : (position.invalidation ?? '').slice(0, 18)}
-																</span>
-															) : null}
-															{position.expected_days ? <span className="trading-subtle">预期 {position.expected_days} 日</span> : null}
-															{/* 入场置信度与建仓环境：复盘时回答「当时多有把握」，
-															    它比买入理由更客观——理由是叙述，置信度是当时的数字。 */}
-															{position.entry_confidence ? (
-																<span className="trading-subtle" title={position.entry_regime ? `建仓环境：${position.entry_regime}` : ''}>
-																	入场置信 {position.entry_confidence.toFixed(2)}
-																</span>
-															) : null}
+															{/* 入场置信度：复盘时回答「当时多有把握」，它比买入理由更客观——理由是叙述，置信度是当时的数字。 */}
 															{/* 复核轮次：证明这笔仓位不是买入后没人再看 */}
-															{position.review_count ? <span className="trading-subtle">已复核 {position.review_count} 轮</span> : null}
-															{position.auto_reduce_at ? <span className="trading-chip">已自动减仓一次</span> : null}
+															<div className="trading-defense-meta">
+																{(position.reduce_count ?? 0) > 0 && <span>已止盈 {position.reduce_count} 级</span>}
+																{(position.invalidation_rule?.price_below || position.invalidation) && (
+																	<span title={position.invalidation ?? ''}>
+																		失效 {position.invalidation_rule?.price_below ? `跌破 ${position.invalidation_rule.price_below.toFixed(2)}` : (position.invalidation ?? '').slice(0, 18)}
+																	</span>
+																)}
+																{position.expected_days ? <span>预期 {position.expected_days} 日</span> : null}
+																{position.entry_confidence ? <span title={position.entry_regime ? `建仓环境：${position.entry_regime}` : ''}>置信 {position.entry_confidence.toFixed(2)}</span> : null}
+																{position.review_count ? <span>复核 {position.review_count} 轮</span> : null}
+																{position.auto_reduce_at ? <span className="trading-chip">已自动减仓</span> : null}
+															</div>
 														</td>
 														<td>
 															<button type="button" className="trading-link" onClick={() => setProtection({
