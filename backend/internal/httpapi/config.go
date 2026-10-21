@@ -218,8 +218,8 @@ type Config struct {
 	ReviewStore              *review.Store
 	PortfolioStore           *portfolioinspection.Store
 	// TradingDBPath 与 TradingStore 对应模拟盘账本；交易智能体只写本地账本，不触达券商。
-	TradingDBPath        string
-	TradingStore         *trading.Store
+	TradingDBPath string
+	TradingStore  *trading.Store
 	// TradingAlert 是告警外发配置。零值表示不配任何出口：
 	// 事件照常落库，但不会离开这台机器。这是刻意的默认——
 	// 本地开发和跑测试都不该因为没填 webhook 就报错。
