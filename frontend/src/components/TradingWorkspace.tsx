@@ -1261,6 +1261,23 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 		if (!account || account.account.initial_cash <= 0) return 0;
 		return ((account.account.equity - account.account.initial_cash) / account.account.initial_cash) * 100;
 	}, [account]);
+	// 资产构成条：三个数都来自账户快照，按总资产求占比，不额外估算。
+	const allocation = useMemo(() => {
+		const equity = account?.account.equity ?? 0;
+		const marketValue = account?.account.market_value ?? 0;
+		const cash = account ? availableCash(account.account) : 0;
+		const frozen = account?.account.reserved_cash ?? 0;
+		const base = Math.max(equity, marketValue + cash + frozen, 1);
+		return {
+			equity,
+			marketValue,
+			cash,
+			frozen,
+			positionPercent: (marketValue / base) * 100,
+			cashPercent: (cash / base) * 100,
+			frozenPercent: (frozen / base) * 100,
+		};
+	}, [account]);
 
 	// 后端在 running 阶段可能还没有订单，统一兜底成空数组，避免 .length 崩掉整页。
 	const activeOrders = active?.orders ?? [];
@@ -1316,23 +1333,31 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 	return (
 		<section className="trading-workspace">
 			<aside className="trading-nav" aria-label="AI交易员功能">
-				<header><TrendingUp size={18} /><div><span>TRADING AGENT</span><strong>AI交易员</strong></div></header>
-				{tradingNavGroups.map((group) => (
-					<section key={group.id}>
-						<h2>{group.name}</h2>
-						<div>{group.modules.map((module) => {
-							const Icon = tradingModuleIcons[module.id];
-							const badge = navBadges[module.id];
-							return (
-								<button type="button" key={module.id} className={activeView === module.id ? 'active' : ''} onClick={() => selectTradingView(module.id)}>
-									<Icon size={16} />
-									<span><strong>{module.name}</strong><small>{module.description}</small></span>
-									{badge ? <em>{badge}</em> : null}
-								</button>
-							);
-						})}</div>
-					</section>
-				))}
+				<header>
+					<i className="trading-nav-mark"><TrendingUp size={17} /></i>
+					<div>
+						<strong>AI交易员</strong>
+						<small>模拟盘 · 计划与自动执行</small>
+					</div>
+				</header>
+				<div className="trading-nav-scroll">
+					{tradingNavGroups.map((group) => (
+						<section key={group.id}>
+							<h2>{group.name}</h2>
+							<div>{group.modules.map((module) => {
+								const Icon = tradingModuleIcons[module.id];
+								const badge = navBadges[module.id];
+								return (
+									<button type="button" key={module.id} className={activeView === module.id ? 'active' : ''} onClick={() => selectTradingView(module.id)}>
+										<Icon size={15} />
+										<span><strong>{module.name}</strong><small>{module.description}</small></span>
+										{badge ? <em>{badge}</em> : null}
+									</button>
+								);
+							})}</div>
+						</section>
+					))}
+				</div>
 				<footer className="trading-nav-foot">
 					<i className={`trading-gate-dot ${gateTone}`} aria-hidden="true" />
 					<span>{controlGateText(account?.control)}</span>
@@ -1341,7 +1366,7 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 
 			<div className="trading-main">
 				<header className="trading-hero">
-					<div>
+					<div className="trading-hero-copy">
 						<span>{findTradingGroupName(activeView)}</span>
 						<h2>
 							{activeTradingModule.name}
@@ -1360,6 +1385,10 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 						<button type="button" className="trading-ghost" onClick={refreshTradingData} disabled={loading || boardLoading}>
 							{loading || boardLoading ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} 刷新数据
 						</button>
+						{(() => {
+							const HeroIcon = tradingModuleIcons[activeView];
+							return <i className="trading-hero-icon" aria-hidden="true"><HeroIcon size={24} /></i>;
+						})()}
 					</div>
 				</header>
 
@@ -1375,77 +1404,85 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 					<>
 						{/* 四块状态条：自动运行、市场环境、健康、门控。
 						    它们回答「系统现在在不在工作」，比盈亏更该被先看到。 */}
-						<div className="trading-status-strip">
-							<button type="button" className={`trading-status-tile ${autopilot?.running ? 'ok' : 'idle'}`} onClick={() => selectTradingView('autopilot')}>
-								<i><CalendarClock size={17} /></i>
-								<span className="trading-tile-body">
-									<span>自动运行</span>
-									<strong>{autopilot ? (autopilot.running ? '运行中' : '已停止') : '—'}</strong>
-									<em>
-										{autopilot
-											? autopilot.running
-												? autopilot.next_run_at
-													? `下一轮 ${clockText(autopilot.next_run_at)}`
-													: `今日已跑 ${autopilot.cycles_today} 轮`
-												: '点此开启自动运行'
-											: '等待读取'}
-									</em>
-								</span>
-							</button>
-							<button type="button" className={`trading-status-tile ${board?.market?.evaluated ? 'ok' : 'idle'}`} onClick={() => selectTradingView('market')}>
-								<i><Activity size={17} /></i>
-								<span className="trading-tile-body">
-									<span>市场环境</span>
-									<strong>{board?.market?.evaluated ? board.market.label : '未评估'}</strong>
-									<em>{board?.market?.evaluated ? `允许仓位上限 ${board.market.risk_budget_percent}%` : '点此刷新市场判定'}</em>
-								</span>
-							</button>
-							<button type="button" className={`trading-status-tile ${health ? (health.status === 'healthy' ? 'ok' : health.status === 'warning' ? 'warn' : 'bad') : 'idle'}`} onClick={() => selectTradingView('ops')}>
-								<i><ShieldCheck size={17} /></i>
-								<span className="trading-tile-body">
-									<span>健康检查</span>
-									<strong>{health ? healthLabel(health.status) : '—'}</strong>
-									<em>{health ? `${health.positions} 只持仓 · ${health.open_orders} 笔挂单` : '等待读取'}</em>
-								</span>
-							</button>
-							{/* 门控格不是跳转入口而是操作入口：状态和总闸放在同一格，
-							    避免页面上出现两处写着「正常运行」的地方。 */}
-							<div
-								className={`trading-status-tile gate ${gateTone}`}
-								title={account?.control.kill_switch
-									? '不生成新计划，任何挂单都不会成交；已有挂单保留，可撤销。'
-									: account?.control.pause_buying
-										? '只停新增买入，卖出与减仓照常执行。'
-										: '门控放行。全自动执行上线后，这里是唯一的人工总闸。'}
-							>
-								<i><PowerCircle size={17} /></i>
-								<span className="trading-tile-body">
-									<span>交易门控</span>
-									<strong>{controlGateText(account?.control)}</strong>
-									<div className="trading-gate-actions">
-										<button
-											type="button"
-											className="trading-ghost"
-											onClick={() => void handleControl({ pause_buying: !account?.control.pause_buying })}
-											disabled={controlBusy || !account || account.control.kill_switch}
-										>
-											{account?.control.pause_buying && !account?.control.kill_switch ? '恢复买入' : '暂停买入'}
-										</button>
-										<button
-											type="button"
-											className={`trading-ghost ${account?.control.kill_switch ? 'danger active' : 'danger'}`}
-											onClick={() => void handleControl({ kill_switch: !account?.control.kill_switch })}
-											disabled={controlBusy || !account}
-										>
-											{account?.control.kill_switch ? '解除停止' : '全部停止'}
-										</button>
-										<button type="button" className="trading-link" onClick={() => void handleReconcile()} disabled={reconciling || !account}>
-											{reconciling ? '对账中…' : '对账'}
-										</button>
-									</div>
-								</span>
+						<section className="trading-status-panel" aria-label="运行状态">
+							<header>
+								<Activity size={16} />
+								<h2>运行状态</h2>
+								<span className="trading-subtle">系统是否在自动运行、市场是否允许开仓、门控是否放行</span>
+							</header>
+							<div className="trading-status-strip">
+								<button type="button" className={`trading-status-tile ${autopilot?.running ? 'ok' : 'idle'}`} onClick={() => selectTradingView('autopilot')}>
+									<i><CalendarClock size={16} /></i>
+									<span className="trading-tile-body">
+										<span>自动运行</span>
+										<strong>{autopilot ? (autopilot.running ? '运行中' : '已停止') : '—'}</strong>
+										<em>
+											{autopilot
+												? autopilot.running
+													? autopilot.next_run_at
+														? `下一轮 ${clockText(autopilot.next_run_at)}`
+														: `今日已跑 ${autopilot.cycles_today} 轮`
+													: '点此开启自动运行'
+												: '等待读取'}
+										</em>
+									</span>
+								</button>
+								<button type="button" className={`trading-status-tile ${board?.market?.evaluated ? 'ok' : 'idle'}`} onClick={() => selectTradingView('market')}>
+									<i><Activity size={16} /></i>
+									<span className="trading-tile-body">
+										<span>市场环境</span>
+										<strong>{board?.market?.evaluated ? board.market.label : '未评估'}</strong>
+										<em>{board?.market?.evaluated ? `允许仓位上限 ${board.market.risk_budget_percent}%` : '点此刷新市场判定'}</em>
+									</span>
+								</button>
+								<button type="button" className={`trading-status-tile ${health ? (health.status === 'healthy' ? 'ok' : health.status === 'warning' ? 'warn' : 'bad') : 'idle'}`} onClick={() => selectTradingView('ops')}>
+									<i><ShieldCheck size={16} /></i>
+									<span className="trading-tile-body">
+										<span>健康检查</span>
+										<strong>{health ? healthLabel(health.status) : '—'}</strong>
+										<em>{health ? `${health.positions} 只持仓 · ${health.open_orders} 笔挂单` : '等待读取'}</em>
+									</span>
+								</button>
+								{/* 门控格不是跳转入口而是操作入口：状态和总闸放在同一格，
+								    避免页面上出现两处写着「正常运行」的地方。 */}
+								<div
+									className={`trading-status-tile gate ${gateTone}`}
+									title={account?.control.kill_switch
+										? '不生成新计划，任何挂单都不会成交；已有挂单保留，可撤销。'
+										: account?.control.pause_buying
+											? '只停新增买入，卖出与减仓照常执行。'
+											: '门控放行。全自动执行上线后，这里是唯一的人工总闸。'}
+								>
+									<i><PowerCircle size={16} /></i>
+									<span className="trading-tile-body">
+										<span>交易门控</span>
+										<strong>{controlGateText(account?.control)}</strong>
+										<em>人工总闸</em>
+										<div className="trading-gate-actions">
+											<button
+												type="button"
+												className="trading-ghost"
+												onClick={() => void handleControl({ pause_buying: !account?.control.pause_buying })}
+												disabled={controlBusy || !account || account.control.kill_switch}
+											>
+												{account?.control.pause_buying && !account?.control.kill_switch ? '恢复买入' : '暂停买入'}
+											</button>
+											<button
+												type="button"
+												className={`trading-ghost ${account?.control.kill_switch ? 'danger active' : 'danger'}`}
+												onClick={() => void handleControl({ kill_switch: !account?.control.kill_switch })}
+												disabled={controlBusy || !account}
+											>
+												{account?.control.kill_switch ? '解除停止' : '全部停止'}
+											</button>
+											<button type="button" className="trading-link" onClick={() => void handleReconcile()} disabled={reconciling || !account}>
+												{reconciling ? '对账中…' : '对账'}
+											</button>
+										</div>
+									</span>
+								</div>
 							</div>
-						</div>
+						</section>
 
 						<div className="trading-summary">
 							<article>
@@ -1492,27 +1529,71 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							</article>
 						</div>
 
-						{/* 待办放在资产之后：先知道自己有多少钱，再决定要不要处理这些事。 */}
-						<section className="trading-attention">
-							<header>
-								<ShieldAlert size={16} />
-								<h2>需要你处理</h2>
-								<span className="trading-subtle">{attention.length ? `${attention.length} 项待办` : '暂无待办'}</span>
-							</header>
-							{attention.length === 0 ? (
-								<p className="trading-subtle">当前没有需要你处理的事项：风控、账本与告警都在正常范围内。</p>
-							) : (
-								<ul>
-									{attention.slice(0, 6).map((item) => (
-										<li key={item.text} className={item.tone}>
-											<i aria-hidden="true" />
-											<span>{item.text}</span>
-											<button type="button" className="trading-link" onClick={() => selectTradingView(item.view)}>{item.action}</button>
-										</li>
-									))}
+						{/* 待办放在资产之后：先知道自己有多少钱，再决定要不要处理这些事。
+						    右栏资产构成条同样只读账户快照，用一条堆叠条把持仓/现金/冻结的比例画出来。 */}
+						<div className="trading-overview-grid">
+							<section className="trading-attention">
+								<header>
+									<ShieldAlert size={16} />
+									<h2>需要你处理</h2>
+									<span className="trading-subtle">{attention.length ? `${attention.length} 项待办` : '暂无待办'}</span>
+								</header>
+								{attention.length === 0 ? (
+									<p className="trading-subtle">当前没有需要你处理的事项：风控、账本与告警都在正常范围内。</p>
+								) : (
+									<ul>
+										{attention.slice(0, 6).map((item) => (
+											<li key={item.text} className={item.tone}>
+												<i aria-hidden="true" />
+												<span>{item.text}</span>
+												<button type="button" className="trading-link" onClick={() => selectTradingView(item.view)}>{item.action}</button>
+											</li>
+										))}
+									</ul>
+								)}
+							</section>
+
+							<section className="trading-allocation">
+								<header>
+									<PieChart size={16} />
+									<h2>资产构成</h2>
+									<span className="trading-subtle">{account ? `总资产 ¥ ${formatMoney(allocation.equity)}` : '等待读取'}</span>
+								</header>
+								<div
+									className="trading-alloc-bar"
+									role="img"
+									aria-label={`持仓市值 ${allocation.positionPercent.toFixed(1)}%，可用资金 ${allocation.cashPercent.toFixed(1)}%，挂单冻结 ${allocation.frozenPercent.toFixed(1)}%`}
+								>
+									<i className="position" style={{ width: `${allocation.positionPercent}%` }} />
+									<i className="cash" style={{ width: `${allocation.cashPercent}%` }} />
+									<i className="frozen" style={{ width: `${allocation.frozenPercent}%` }} />
+								</div>
+								<ul className="trading-alloc-legend">
+									<li>
+										<i className="position" aria-hidden="true" />
+										<span>持仓市值</span>
+										<strong>{account ? `¥ ${formatMoney(allocation.marketValue)}` : '—'}</strong>
+										<em>{account ? `${allocation.positionPercent.toFixed(1)}%` : '—'}</em>
+									</li>
+									<li>
+										<i className="cash" aria-hidden="true" />
+										<span>可用资金</span>
+										<strong>{account ? `¥ ${formatMoney(allocation.cash)}` : '—'}</strong>
+										<em>{account ? `${allocation.cashPercent.toFixed(1)}%` : '—'}</em>
+									</li>
+									<li>
+										<i className="frozen" aria-hidden="true" />
+										<span>挂单冻结</span>
+										<strong>{account ? `¥ ${formatMoney(allocation.frozen)}` : '—'}</strong>
+										<em>{account ? `${allocation.frozenPercent.toFixed(1)}%` : '—'}</em>
+									</li>
 								</ul>
-							)}
-						</section>
+								<p className={`trading-alloc-note ${board?.market?.evaluated && allocation.positionPercent > board.market.risk_budget_percent ? 'warn' : ''}`}>
+									<span>当前仓位 {account ? `${allocation.positionPercent.toFixed(1)}%` : '—'}</span>
+									<span>市场允许上限 {board?.market?.evaluated ? `${board.market.risk_budget_percent}%` : '未评估'}</span>
+								</p>
+							</section>
+						</div>
 
 						{/* 两个数字口径不同，必须有一行把中间项摆出来。
 						    少了它，"总资产 -630"和"浮动 +672"看上去就是矛盾的。 */}
