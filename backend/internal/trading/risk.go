@@ -246,6 +246,23 @@ func BuildOrders(accountID string, draft DraftPlan, snapshot Snapshot, rules Ris
 		}
 
 		if order.Side == SideBuy {
+			// 入场位置先于仓位判断：仓位大小回答"亏得起吗"，位置回答"该不该买"。
+			// 顺序反了会给出一堆"被缩到 2% 的追高单"，看着很谨慎，实际还是在追。
+			//
+			// 快照里没有位置表（EntryPositions 为 nil）时完全跳过：老沙盘快照
+			// 没有这份数据，按"位置未知"去 warn 会把历史重放刷满噪音。
+			// 表存在但缺这只票，才是真的"取数失败"，由 CheckEntryPosition 出 warn。
+			if snapshot.EntryPositions != nil {
+				position := snapshot.EntryPositions[order.Symbol]
+				if verdict, blocked := CheckEntryPosition(order, position, rules); blocked {
+					verdict.Field = field
+					block(&order, verdict)
+					continue
+				} else if verdict.Code != "" {
+					verdict.Field = field
+					verdicts = append(verdicts, verdict)
+				}
+			}
 			if item.TargetWeightPercent <= 0 || item.TargetWeightPercent > 100 {
 				block(&order, policy.Verdict{
 					Code: policy.CodeRiskSingleName, Level: policy.LevelBlock, Scope: policy.ScopeOrder,

@@ -65,6 +65,12 @@ type PlanPromptInput struct {
 	// ExposureCeiling 是本轮生效的总仓位上限，已含市场预算、风控上限与
 	// 当日迟滞。为 0 时按 Market 现算（沙盘回放老快照）。
 	ExposureCeiling float64
+	// EntryPositions 是候选标的的入场位置（当日涨幅、距 MA20、连涨天数）。
+	//
+	// 它解决的是一个被数据证明的盲区：251 步决策里板块资金流被查了 73 次，
+	// 个股快照只有 4 次——模型一直在看"哪个板块在涨"，很少看"这只票现在在什么位置"。
+	// 位置不能靠模型主动查，必须摆在它眼前。
+	EntryPositions map[string]EntryPosition
 }
 
 // BlockedIntent 是一条被拦下的建议。它保留模型的原始意图（想买多少、什么价位），
@@ -150,7 +156,15 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	// 这条来自真实浪费：模型连续两轮给出 688 开头的标的，而科创板一手 200 股，
 	// 目标金额买不起一手，两笔建议全部在 sizing.below_lot 被拒。
 	// 与其让守卫一次次拦，不如把规则先告诉它。
-	fmt.Fprintf(&builder, "11. 688 开头的科创板标的一手为 200 股，若目标金额买不起一手（200 × 现价），不要提交该笔建议。\n\n")
+	fmt.Fprintf(&builder, "11. 688 开头的科创板标的一手为 200 股，若目标金额买不起一手（200 × 现价），不要提交该笔建议。\n")
+	// 入场位置是硬约束，必须先说：不说的话模型会连续给出位置过高的建议，
+	// 然后被逐条拦掉，界面上看起来像"模型很积极、系统总在否决"。
+	// 阈值与裁决用的是同一个数（rules），改阈值时提示词自动跟着变。
+	fmt.Fprintf(&builder, "12. 买入必须满足位置条件：当日涨幅低于 %.1f%%、现价高出 20 日均线不超过 %.1f%%、连续上涨少于 %d 天。\n",
+		rules.MaxEntryChangePercent, rules.MaxEntryMA20Percent, rules.MaxEntryUpDays)
+	builder.WriteString("   超过任一条，系统会直接取消该笔（不是缩量，是取消）。这是历史的代价换来的：\n")
+	builder.WriteString("   在当日已涨 6% 以上、或离均线 12% 以上的位置买入，未来 5 日的期望收益为负。\n")
+	builder.WriteString("   看好但位置已高，正确做法是等回踩或换同板块中位置更低的标的，而不是降低置信度硬上。\n\n")
 
 	builder.WriteString("## 二、账户状态\n")
 	fmt.Fprintf(&builder, "- 时间：%s（北京时间）\n", input.Now.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04"))
@@ -359,7 +373,9 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 		if board.Degraded {
 			builder.WriteString("当日市场缩量，成交额门槛已下调。")
 		}
-		builder.WriteString("\n\n以下每只标的的入选依据都附带具体数字，请据此判断，不要仅凭名称联想题材：\n\n")
+		builder.WriteString("\n\n以下每只标的的入选依据都附带具体数字，请据此判断，不要仅凭名称联想题材：\n")
+		builder.WriteString("「位置」是系统按日线算出的入场位置：当日涨幅、距 20 日均线偏离、距 20 日收盘高、连涨天数。\n")
+		builder.WriteString("标了【位置超限】的票本轮不可买入——它在硬约束第 12 条之外，提交只会被取消，不要浪费名额。\n\n")
 		for index, candidate := range board.Candidates {
 			if index >= maxPromptCandidates {
 				break
@@ -373,8 +389,22 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 			if sector != "" {
 				sector = "[" + sector + "] "
 			}
-			fmt.Fprintf(&builder, "- %s %s%s（系统评分 %.1f）：%s\n",
+			fmt.Fprintf(&builder, "- %s %s%s（系统评分 %.1f）：%s",
 				candidate.Symbol, candidate.Name, sector, candidate.Score, strings.Join(candidate.Reasons, "；"))
+			// 位置逐只标注。缺数据时不写"位置良好"，而是明说不知道：
+			// 让模型把"没算出来"读成"没问题"，正是这道门要防的事。
+			// 取位置前先规范化代码：候选池里是 "300308"，位置表的主键是 "300308.SZ"，
+			// 直接按原样查会全部落空，界面上就变成"每只票都没算出来"。
+			if position, ok := input.EntryPositions[normalizeSymbolOrEmpty(candidate.Symbol)]; ok {
+				if _, blocked := CheckEntryPosition(Order{Symbol: candidate.Symbol}, position, rules); blocked {
+					fmt.Fprintf(&builder, "｜位置：%s【位置超限】", EntryPositionLine(position))
+				} else {
+					fmt.Fprintf(&builder, "｜位置：%s", EntryPositionLine(position))
+				}
+			} else {
+				builder.WriteString("｜位置：未取到日线")
+			}
+			builder.WriteString("\n")
 		}
 		if len(board.Exclusions) > 0 {
 			builder.WriteString("\n主要排除项（用于判断本池是否偏窄）：\n")

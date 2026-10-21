@@ -101,6 +101,28 @@ const (
 	CodeRiskCooldownSymbol = "risk.cooldown_symbol"
 	CodeRiskCooldownSector = "risk.cooldown_sector"
 
+	// 入场位置：这一组补的是"只管买多少、不管在什么位置买"的空缺。
+	//
+	// 在此之前 14 条规则全部落在仓位与止损上，没有任何一条回答
+	// "这只票今天已经涨了 6%、离 20 日均线 18%，现在追进去合理吗"。
+	// 实际后果是 10-20 那天 9 笔买入全部发生在当日 +3.4%~+5.6% 的位置，
+	// 次日低开约 4% 被模型清仓，合计 -1157.67 元。
+	//
+	// 三条规则分开编码而不是合并成一条 "chase"：三者的处置完全不同——
+	// 当日涨幅过大是"等一天"，偏离均线过大是"等回踩"，连涨过久是"这波走完了"。
+	// 合成一个码，复盘时就分不清该改哪条阈值。
+	CodeRiskEntryChase = "risk.entry_chase"
+	// CodeRiskEntryExtended 表示现价相对 20 日均线的偏离超过阈值。
+	CodeRiskEntryExtended = "risk.entry_extended"
+	// CodeRiskEntryStreak 表示连续上涨天数超过阈值。
+	CodeRiskEntryStreak = "risk.entry_streak"
+	// CodeRiskEntryUnmeasured 表示拿不到日线，位置无法判定。
+	//
+	// 它是 warn 而不是 block：数据源故障不该让整个账户停止开仓，
+	// 否则一次接口抖动就变成一次"系统不敢交易"。但也不能静默——
+	// 记一条 warn，复盘时才看得出"这段时间的买入其实没有位置约束"。
+	CodeRiskEntryUnmeasured = "risk.entry_unmeasured"
+
 	CodeSizingBelowLot       = "sizing.below_lot"
 	CodeSizingReducedByCash  = "sizing.reduced_by_cash"
 	CodeSizingScaled         = "sizing.scaled"
@@ -180,6 +202,18 @@ type Limits struct {
 	// 结果是每只票的涨跌都被摊成噪音，而每笔买卖的佣金照付；
 	// 更贵的是复核成本——每轮要给 21 条失效条件各判一次。
 	MaxPositions int `json:"max_positions"`
+	// 入场位置三道闸。三个数字都来自历史标定（见 entry.go 注释里的实测表），
+	// 不是拍脑袋定的；改动前先看那张表，别凭手感调。
+	//
+	// MaxEntryChangePercent：当日涨幅上限。追已经涨了 7% 的票，
+	// 买的是别人的止盈盘。
+	MaxEntryChangePercent float64 `json:"max_entry_change_percent"`
+	// MaxEntryMA20Percent：现价高出 20 日均线的上限。
+	// 这条与当日涨幅互补：连涨五天每天涨 1.5%，当日涨幅只有 1.5%，
+	// 但累计偏离已经很远，只看当日涨幅会漏掉这种"温水追高"。
+	MaxEntryMA20Percent float64 `json:"max_entry_ma20_percent"`
+	// MaxEntryUpDays：连续上涨天数上限。
+	MaxEntryUpDays int `json:"max_entry_up_days"`
 }
 
 // Default 是基准阈值。
@@ -195,6 +229,13 @@ func Default() Limits {
 		MaxSectorWeightPercent:  45,
 		MaxSectorNames:          3,
 		MaxPositions:            20,
+		// 入场位置默认值。依据是 entry.go 注释里那张实测表
+		// （150 只票、14.4 万个交易日截面、按次日开盘入场的口径）：
+		// 当日涨幅 ≥6% 的未来 5 日收益转负；偏离 MA20 ≥10% 转负；
+		// 连涨 ≥5 天后转负。三档都取"转负"的那一档，不提前收网。
+		MaxEntryChangePercent: 6,
+		MaxEntryMA20Percent:   12,
+		MaxEntryUpDays:        5,
 	}
 }
 
@@ -231,6 +272,17 @@ func (l Limits) Normalize() Limits {
 	}
 	if l.MaxPositions <= 0 || l.MaxPositions > 100 {
 		l.MaxPositions = defaults.MaxPositions
+	}
+	// 入场位置三档：越界一律拉回默认值。故意不提供"设为 0 即关闭"的语义——
+	// 关闭位置约束正是这次要修的毛病，留一个开关等于留一条改回去的捷径。
+	if l.MaxEntryChangePercent <= 0 || l.MaxEntryChangePercent > 30 {
+		l.MaxEntryChangePercent = defaults.MaxEntryChangePercent
+	}
+	if l.MaxEntryMA20Percent <= 0 || l.MaxEntryMA20Percent > 100 {
+		l.MaxEntryMA20Percent = defaults.MaxEntryMA20Percent
+	}
+	if l.MaxEntryUpDays <= 0 || l.MaxEntryUpDays > 20 {
+		l.MaxEntryUpDays = defaults.MaxEntryUpDays
 	}
 	return l
 }

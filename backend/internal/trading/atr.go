@@ -31,12 +31,25 @@ import (
 )
 
 // atrProfile 是一只标的的波动率画像。
+//
+// 除 ATR 外还带上 MA20、20 日最高价与连涨天数：这三项与 ATR 用的是同一批日线，
+// 多算它们不增加一次网络请求，却能让"现价处在什么位置"成为可判定的事实。
+// 分开去取会让同一只票在一轮里拉两次日线，还可能拿到不同时点的两份数据。
 type atrProfile struct {
 	Symbol string
 	ATR    float64
 	Price  float64
 	Bars   int
 	At     time.Time
+	// MA20 是最近 20 个交易日收盘均值，取不到 20 根时为 0。
+	MA20 float64
+	// High20 是最近 20 个交易日收盘最高值。用收盘价而非最高价：
+	// 盘中影线创高又收回来，不构成"站上高位"，用最高价会把长上影误判成突破。
+	High20 float64
+	// ConsecutiveUp 是截至最后一根为止的连续上涨天数。
+	ConsecutiveUp int
+	// PrevClose 是最后一根的前一根收盘价，用于在没有行情快照时也能算出当日涨幅。
+	PrevClose float64
 }
 
 // Valid 表示这份画像足以支撑一次止损校正。
@@ -100,14 +113,60 @@ func (s *Service) loadATR(ctx context.Context, symbol string) atrProfile {
 		return atrProfile{Symbol: symbol, At: time.Now()}
 	}
 	profile := atrProfile{
-		Symbol: symbol,
-		ATR:    round4(atrOf(bars, atrPeriod)),
-		Price:  bars[len(bars)-1].Close,
-		Bars:   len(bars),
-		At:     time.Now(),
+		Symbol:        symbol,
+		ATR:           round4(atrOf(bars, atrPeriod)),
+		Price:         bars[len(bars)-1].Close,
+		Bars:          len(bars),
+		At:            time.Now(),
+		MA20:          round4(meanClose(bars, entryMAPeriod)),
+		High20:        round4(highestClose(bars, entryMAPeriod)),
+		ConsecutiveUp: consecutiveUpDays(bars),
+		PrevClose:     round4(bars[len(bars)-2].Close),
 	}
 	s.storeATR(profile)
 	return profile
+}
+
+// meanClose 返回最近 n 根收盘均值。不足 n 根返回 0——宁可让调用方看到"算不出来"，
+// 也不要用不足的窗口冒充 20 日均线：5 根均值挂在 MA20 的名义下会误导判断。
+func meanClose(bars []foundation.KLine, n int) float64 {
+	if n <= 0 || len(bars) < n {
+		return 0
+	}
+	sum := 0.0
+	for _, bar := range bars[len(bars)-n:] {
+		sum += bar.Close
+	}
+	return sum / float64(n)
+}
+
+// highestClose 返回最近 n 根收盘最高值。用收盘价而不是盘中最高价：
+// 长上影创高又收回来不属于"站在高位"，用最高价会把这种走势误判成突破。
+func highestClose(bars []foundation.KLine, n int) float64 {
+	if n <= 0 || len(bars) < n {
+		return 0
+	}
+	high := bars[len(bars)-n].Close
+	for _, bar := range bars[len(bars)-n:] {
+		if bar.Close > high {
+			high = bar.Close
+		}
+	}
+	return high
+}
+
+// consecutiveUpDays 数截至最后一根的连续上涨天数。
+// 平盘即中断：连涨的定义是"每天都在创新高"，持平不算。
+func consecutiveUpDays(bars []foundation.KLine) int {
+	streak := 0
+	for i := len(bars) - 1; i > 0; i-- {
+		if bars[i].Close > bars[i-1].Close {
+			streak++
+			continue
+		}
+		break
+	}
+	return streak
 }
 
 func (s *Service) cachedATR(symbol string) (atrProfile, bool) {
@@ -167,7 +226,17 @@ func (s *Service) AdjustDraftStops(ctx context.Context, draft *DraftPlan, snapsh
 		}
 		// 波动率画像同时记进快照：定价（仓位）与防守（止损）必须用同一个数，
 		// 分别去取一次会在两次请求之间拿到不同的 ATR，复盘时无法解释。
-		snapshot.ATRs[normalizeSymbolOrEmpty(order.Symbol)] = profile.ATRPercent()
+		symbol := normalizeSymbolOrEmpty(order.Symbol)
+		snapshot.ATRs[symbol] = profile.ATRPercent()
+		// 位置事实顺手用同一份画像算出来：模型本轮可能买进一只不在候选池里的票
+		// （比如加仓已持仓），那种票在提示词阶段没被算过位置。
+		// 这里补上，裁决时才有一份可信的位置，而不是"未知放行"。
+		if snapshot.EntryPositions == nil {
+			snapshot.EntryPositions = map[string]EntryPosition{}
+		}
+		if _, exists := snapshot.EntryPositions[symbol]; !exists {
+			snapshot.EntryPositions[symbol] = entryPositionOf(quoteOf(snapshot.Quotes, symbol), profile)
+		}
 		adjusted, note := atrAdjustStop(order.StopLossPrice, price, profile.ATR, rules.MaxStopLossPercent)
 		if note == "" {
 			continue

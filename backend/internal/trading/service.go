@@ -622,6 +622,13 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		return plan, ErrNoMaterialChange
 	}
 
+	// 入场位置在调研之前算好：它是提示词的一部分（候选池里逐只标注），
+	// 也是裁决时的硬约束。放在跳过检测之后，安静轮次不会白花这几次取数。
+	if positions := s.collectEntryPositions(ctx, snapshot.Universe, snapshot.Quotes); len(positions) > 0 {
+		snapshot.EntryPositions = positions
+		plan.Snapshot.EntryPositions = positions
+	}
+
 	// 调研阶段：模型用只读工具自己查事实，然后才进计划提示词。
 	//
 	// 失败一律降级、不阻断：调研是增益，不是前置条件。把它做成硬前置的话，
@@ -679,9 +686,15 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		Calibration:   s.calibrationPromptLine(ctx, accountID, time.Now()),
 		PriorResearch: s.PriorResearchForPrompt(ctx, accountID, time.Now()),
 		PlanDiff:      s.PlanDiffForPrompt(ctx, accountID, planID, snapshot, time.Now()),
+		// 位置事实与裁决用的是同一份快照字段，模型看到的数字就是拦它的那个数字。
+		EntryPositions: snapshot.EntryPositions,
 	})
 
 	startedAt := time.Now()
+	// 自证日志：位置有没有真的算出来、这一轮挡掉了几只，必须在日志里能查到。
+	// 没有这一行，"位置已接入"只能靠读代码相信，而读代码相信正是上一轮出错的方式。
+	s.logf("event=trading_entry_position plan=%s measured=%d over_limit=%d", planID,
+		len(snapshot.EntryPositions), countEntryBlocked(snapshot, rules))
 	result, err := agent.PromptUsingOptions(ctx, s.gateway, prompt, agent.PromptOptions{
 		Sandbox:              true,
 		AutoApprove:          true,

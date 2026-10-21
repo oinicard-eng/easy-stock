@@ -343,9 +343,15 @@ type Snapshot struct {
 	// 为什么放在快照里而不是议决时现取：沙盘要用同一份输入重放，
 	// 现取会拿今天的波动率去重算上周的计划，差异里就混进了"时间变化"。
 	// 它不进变化检测指纹——ATR 每天都在变，算进去会让安静模式永不生效。
-	ATRs          map[string]float64 `json:"atrs,omitempty"`
-	Universe      []string           `json:"universe"`
-	MissingQuotes []string           `json:"missing_quotes,omitempty"`
+	ATRs map[string]float64 `json:"atrs,omitempty"`
+	// EntryPositions 是裁决时刻各标的的入场位置（当日涨幅、距 MA20、连涨天数）。
+	//
+	// 与 ATRs 同理放进快照：沙盘重放要用同一份输入，
+	// 现取会拿今天的均线去重算上周的判断，差异里混进了时间变化。
+	// 它同样不进变化检测指纹——均线每天都在动，算进去安静模式立刻失效。
+	EntryPositions map[string]EntryPosition `json:"entry_positions,omitempty"`
+	Universe       []string                 `json:"universe"`
+	MissingQuotes  []string                 `json:"missing_quotes,omitempty"`
 	// Market 是本轮对市场状态的判断。未评估时 Evaluated 为 false，
 	// 与"评估了但样本不足（unknown）"是两件事：前者不限制交易，后者必须禁止开仓。
 	Market cognition.MarketView `json:"market"`
