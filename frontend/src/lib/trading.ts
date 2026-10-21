@@ -618,13 +618,23 @@ export function controlGateText(control: TradeControl | null | undefined): strin
 	return '正常运行';
 }
 
-/** 自动循环配置。默认关闭，打开后才会按间隔发起新一轮。 */
+/** 调度时段：区间左闭右开，按北京时间判断 */
+export type TradeScheduleTier = {
+	from: string;
+	to: string;
+	interval_seconds: number;
+};
+
+/** 自动循环配置。默认关闭，打开后才会按排班发起新一轮。 */
 export type TradeAutopilotConfig = {
 	account_id: string;
 	enabled: boolean;
 	/** 打开后计划生成即自动撮合；关闭时停在待确认，等人工扣扳机 */
 	auto_execute: boolean;
+	/** 排班未覆盖时的兜底间隔 */
 	interval_seconds: number;
+	/** 分时段调度：开盘与尾盘密、盘中稀。为空表示全天统一用 interval_seconds */
+	schedule?: TradeScheduleTier[];
 	trader_profile: string;
 	horizon: string;
 	max_daily_loss_percent: number;
@@ -725,6 +735,38 @@ export type TradeAutopilotStatus = {
 	next_run_at?: string;
 	cycles_today: number;
 };
+
+/** 排班表一天能跑多少轮。坏行跳过：一个手误的时段不该让整表算成 0。 */
+export function scheduleCycles(tiers: TradeScheduleTier[] | undefined): number {
+	if (!tiers || tiers.length === 0) return 0;
+	return tiers.reduce((sum, tier) => {
+		const from = clockMinutes(tier.from);
+		const to = clockMinutes(tier.to);
+		if (from === null || to === null || to <= from || tier.interval_seconds <= 0) return sum;
+		return sum + Math.floor(((to - from) * 60) / tier.interval_seconds);
+	}, 0);
+}
+
+/** 当前时刻生效的调度间隔。没有命中任何时段时回落到兜底值。 */
+export function currentIntervalSeconds(config: TradeAutopilotConfig, now = new Date()): number {
+	const minutes = now.getHours() * 60 + now.getMinutes();
+	for (const tier of config.schedule ?? []) {
+		const from = clockMinutes(tier.from);
+		const to = clockMinutes(tier.to);
+		if (from === null || to === null || to <= from || tier.interval_seconds <= 0) continue;
+		if (minutes >= from && minutes < to) return tier.interval_seconds;
+	}
+	return config.interval_seconds;
+}
+
+function clockMinutes(value: string): number | null {
+	const matched = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+	if (!matched) return null;
+	const hour = Number(matched[1]);
+	const minute = Number(matched[2]);
+	if (hour > 23 || minute > 59) return null;
+	return hour * 60 + minute;
+}
 
 export const tradeCycleStatusText: Record<string, string> = {
 	running: '执行中',

@@ -67,6 +67,8 @@ import {
 	setPositionProtection,
 	syncTradingMemory,
 	setTradingControl,
+	currentIntervalSeconds,
+	scheduleCycles,
 	tradeCycleStatusText,
 	tradeCycleTriggerText,
 	tradeOrderStatusText,
@@ -131,6 +133,12 @@ function amountText(value: number): string {
 	if (value >= 1e12) return `${(value / 1e12).toFixed(2)} 万亿`;
 	if (value >= 1e8) return `${(value / 1e8).toFixed(0)} 亿`;
 	return `${(value / 1e4).toFixed(0)} 万`;
+}
+
+function intervalText(seconds: number): string {
+	if (!Number.isFinite(seconds) || seconds <= 0) return '—';
+	if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60} 分钟/轮`;
+	return `${seconds} 秒/轮`;
 }
 
 /** 市场环境：确定性统计结果，与生成计划时用的是同一套计算。 */
@@ -1106,7 +1114,10 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 		if (patch.enabled === true && !autopilot?.config.enabled) {
 			const executeHint = patch.auto_execute ?? autopilot?.config.auto_execute;
 			const mode = executeHint ? '生成后会立即送入模拟撮合' : '生成后停在待确认，需要你点执行';
-			if (!window.confirm(`开启自动交易循环？\n\n每 ${autopilot?.config.interval_seconds ?? 180} 秒最多发起一轮，${mode}。\n当日亏损超过阈值会自动熔断并停止开新仓。`)) return;
+			const cadence = autopilot ? currentIntervalSeconds(autopilot.config) : 900;
+			const daily = autopilot ? scheduleCycles(autopilot.config.schedule) : 0;
+			const plan = daily > 0 ? `全天约 ${daily} 轮（开盘与尾盘密、盘中稀）` : `每 ${intervalText(cadence)} 一轮`;
+			if (!window.confirm(`开启自动交易循环？\n\n${plan}，${mode}。\n卖出与止损由代码每分钟检查，不占用模型调用。\n当日亏损超过阈值会自动熔断并停止开新仓。`)) return;
 		}
 		setAutopilotBusy(true);
 		setError('');
@@ -2042,6 +2053,9 @@ function AutopilotPanel({ status, busy, cycleBusy, onConfigure, onRun, onResetBr
 	const last = status?.last_cycle;
 	const risk = status?.risk;
 	const drawdownStopped = risk?.level === 'drawdown.stop';
+	// 排班轮次与当前生效间隔都从 config 推导，不在前端另存一份：
+	// 两处各写一套，界面显示的节奏迟早会和真实调度对不上。
+	const scheduledCycles = scheduleCycles(config?.schedule);
 
 	return (
 		<section className="trading-autopilot">
@@ -2092,7 +2106,7 @@ function AutopilotPanel({ status, busy, cycleBusy, onConfigure, onRun, onResetBr
 							<strong>{config.auto_execute ? '生成即撮合' : '需人工确认'}</strong>
 						</button>
 						<label className="trading-auto-field">
-							<span>轮询间隔</span>
+							<span>兜底间隔</span>
 							<select
 								value={config.interval_seconds}
 								onChange={(event) => onConfigure({ interval_seconds: Number(event.target.value) })}
@@ -2102,6 +2116,7 @@ function AutopilotPanel({ status, busy, cycleBusy, onConfigure, onRun, onResetBr
 								<option value={180}>3 分钟</option>
 								<option value={300}>5 分钟</option>
 								<option value={600}>10 分钟</option>
+								<option value={900}>15 分钟</option>
 							</select>
 						</label>
 						<label className="trading-auto-field">
@@ -2132,6 +2147,16 @@ function AutopilotPanel({ status, busy, cycleBusy, onConfigure, onRun, onResetBr
 						<div>
 							<span>当日轮次</span>
 							<strong>{status?.cycles_today ?? 0} / {config.max_cycles_per_day}</strong>
+						</div>
+						<div>
+							<span>当前节奏</span>
+							<strong>{config ? intervalText(currentIntervalSeconds(config)) : '—'}</strong>
+						</div>
+						<div>
+							<span>全天计划</span>
+							<strong>
+								{scheduledCycles > 0 ? `${scheduledCycles} 轮（按排班）` : `${config.max_cycles_per_day} 轮（固定间隔）`}
+							</strong>
 						</div>
 						<div>
 							<span>开仓截止</span>

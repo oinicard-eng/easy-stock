@@ -122,23 +122,76 @@ type AutopilotConfig struct {
 	BuyCutoff string `json:"buy_cutoff"`
 	// MaxCyclesPerDay 是当天最多发起多少轮。它是防呆而不是风控：
 	// 没有它，一个写错的间隔会让循环变成刷单机，一晚上把手续费刷掉。
-	MaxCyclesPerDay int       `json:"max_cycles_per_day"`
-	UpdatedAt       time.Time `json:"updated_at,omitempty"`
+	MaxCyclesPerDay int `json:"max_cycles_per_day"`
+	// Schedule 按时段覆盖 IntervalSeconds；为空表示全天统一用 IntervalSeconds。
+	// 为什么需要分时段：A 股 T+1 意味着当天买入当天不能卖，
+	// 每分钟重新决策一次在物理上拿不到任何额外信息——买了也卖不掉。
+	// 而每一轮都是一次完整的多步模型调用（实测约 0.12 元），
+	// 240 轮就是 17 元/天，一年吃掉本金的 4%。
+	Schedule  []ScheduleTier `json:"schedule,omitempty"`
+	UpdatedAt time.Time      `json:"updated_at,omitempty"`
 }
 
-// DefaultAutopilotConfig 返回安全的默认值：关闭、需人工确认、3 分钟一轮。
+// ScheduleTier 描述一个时段内的调度间隔。区间左闭右开，按交易时钟（北京时间）判断。
+type ScheduleTier struct {
+	From            string `json:"from"`             // "09:30"
+	To              string `json:"to"`               // "10:00"
+	IntervalSeconds int    `json:"interval_seconds"` // 该时段内每多少秒一轮
+}
+
+// IntervalAt 返回 now 所处的调度间隔。
+// 没有任何时段命中时回落到 IntervalSeconds——排班表是加速器，不是唯一来源，
+// 一张写错的表不能把循环停掉。
+func (c AutopilotConfig) IntervalAt(now time.Time) int {
+	clock := clockMinutes(now)
+	for _, tier := range c.Schedule {
+		from, errFrom := parseClock(tier.From)
+		to, errTo := parseClock(tier.To)
+		if errFrom != nil || errTo != nil || tier.IntervalSeconds <= 0 || to <= from {
+			// 坏行只跳过这一行：它不该拖累其它时段，更不该让整轮调度失效。
+			continue
+		}
+		if clock >= from && clock < to {
+			return tier.IntervalSeconds
+		}
+	}
+	return c.IntervalSeconds
+}
+
+// DefaultSchedule 返回默认排班，按"这个时刻能得到多少新信息"分配预算，而非平均分配：
+//
+//	09:30-10:00 900s  开盘半小时方向最乱，看两轮确认趋势，不急着建仓
+//	10:00-11:30 900s  趋势基本成型，每 15 分钟看一次
+//	13:00-14:20 900s  午后延续或反转，每 15 分钟看一次
+//	14:20-15:00 600s  尾盘是最优建仓窗口：当日信息最全、隔夜暴露最短，加密到 10 分钟
+//
+// 合计约 17 轮/天。卖出与风控不在这里：止损、止盈、时间止损、失效条件、
+// 回撤熔断全部由代码每分钟执行，一次模型调用都不需要。
+func DefaultSchedule() []ScheduleTier {
+	return []ScheduleTier{
+		{From: "09:30", To: "10:00", IntervalSeconds: 900},
+		{From: "10:00", To: "11:30", IntervalSeconds: 900},
+		{From: "13:00", To: "14:20", IntervalSeconds: 900},
+		{From: "14:20", To: "15:00", IntervalSeconds: 600},
+	}
+}
+
+// DefaultAutopilotConfig 返回安全的默认值：关闭、需人工确认、按排班调度。
 func DefaultAutopilotConfig() AutopilotConfig {
 	return AutopilotConfig{
-		AccountID:           DefaultAccountID,
-		Enabled:             false,
-		AutoExecute:         false,
-		IntervalSeconds:     180,
-		TraderProfile:       "balanced",
-		Horizon:             "1-3 个交易日",
+		AccountID:       DefaultAccountID,
+		Enabled:         false,
+		AutoExecute:     false,
+		IntervalSeconds: 900,
+		TraderProfile:   "balanced",
+		Horizon:         "1-3 个交易日",
+		// MaxDailyLossPercent 是日亏熔断阈值（相对当日基准权益）。
 		MaxDailyLossPercent: 3,
 		BuyCutoff:           "14:50",
-		// 与默认 180 秒间隔匹配：240 分钟 / 3 分钟 = 80 轮，正好覆盖整个交易时段。
-		MaxCyclesPerDay: 80,
+		Schedule:            DefaultSchedule(),
+		// 配额覆盖"排班轮次 + 事件触发余量"。排班 17 轮，
+		// 留一半给异动触发，合计 26；事件通道另有自己的门槛与冷却。
+		MaxCyclesPerDay: cyclesForSchedule(DefaultSchedule(), 900) + 10,
 	}
 }
 
@@ -163,6 +216,27 @@ func cyclesForInterval(intervalSeconds int) int {
 		cycles = 240
 	}
 	return cycles
+}
+
+// cyclesForSchedule 按排班表算出一天的轮次总量。
+// 排班为空或全部无效时回落到单一间隔口径，避免算出 0 轮把循环锁死。
+func cyclesForSchedule(schedule []ScheduleTier, fallbackInterval int) int {
+	total := 0
+	for _, tier := range schedule {
+		from, errFrom := parseClock(tier.From)
+		to, errTo := parseClock(tier.To)
+		if errFrom != nil || errTo != nil || tier.IntervalSeconds <= 0 || to <= from {
+			continue
+		}
+		total += (to - from) * 60 / tier.IntervalSeconds
+	}
+	if total <= 0 {
+		return cyclesForInterval(fallbackInterval)
+	}
+	if total > 240 {
+		return 240
+	}
+	return total
 }
 
 // Normalize 把越界或缺失的配置改回可用值。非法值一律回落到默认，
@@ -192,16 +266,57 @@ func (c AutopilotConfig) Normalize() AutopilotConfig {
 	if _, err := parseClock(c.BuyCutoff); err != nil {
 		c.BuyCutoff = defaults.BuyCutoff
 	}
-	// 配额必须与间隔匹配，否则会出现"跑到一半就停摆"：
+	// 排班表逐行校验，坏行丢弃而不是整表作废：
+	// 一个手误的 "9:3O" 不该让另外三行一起失效。
+	// nil 表示"字段缺失"（老配置），补默认排班；
+	// 空数组表示用户明确选择"全天统一间隔"，尊重它。
+	scheduleWasMissing := c.Schedule == nil
+	if scheduleWasMissing {
+		c.Schedule = defaults.Schedule
+	} else {
+		valid := make([]ScheduleTier, 0, len(c.Schedule))
+		for _, tier := range c.Schedule {
+			from, errFrom := parseClock(tier.From)
+			to, errTo := parseClock(tier.To)
+			if errFrom != nil || errTo != nil || to <= from {
+				continue
+			}
+			if tier.IntervalSeconds < 30 {
+				tier.IntervalSeconds = 30
+			}
+			if tier.IntervalSeconds > 3600 {
+				tier.IntervalSeconds = 3600
+			}
+			valid = append(valid, tier)
+		}
+		c.Schedule = valid
+	}
+	// 配额必须与调度匹配，否则会出现"跑到一半就停摆"：
 	// 60 秒间隔配 40 轮，一个上午就把全天额度用完，下午再也不会动，
 	// 界面上看起来像系统死了，实际是配额用尽。
-	// 这里按"把 240 分钟交易时段覆盖一遍"反推，间隔越短额度越大，上限 240。
-	if c.MaxCyclesPerDay <= 0 || c.MaxCyclesPerDay > 240 {
-		c.MaxCyclesPerDay = cyclesForInterval(c.IntervalSeconds)
-	} else if c.MaxCyclesPerDay == legacyMaxCyclesPerDay {
+	// 有排班时按排班轮次 + 事件触发余量算，没有排班时按单一间隔覆盖全天算。
+	quotaFor := func() int {
+		if len(c.Schedule) > 0 {
+			return cyclesForSchedule(c.Schedule, c.IntervalSeconds) + 10
+		}
+		return cyclesForInterval(c.IntervalSeconds)
+	}
+	switch {
+	case c.MaxCyclesPerDay <= 0 || c.MaxCyclesPerDay > 240:
+		c.MaxCyclesPerDay = quotaFor()
+	case c.MaxCyclesPerDay == legacyMaxCyclesPerDay:
 		// 40 是旧版硬编码默认值，不是用户的选择：老配置存的就是它，
 		// 不跟着升级就会继续在盘中停摆。显式改过的其它值一律尊重。
-		c.MaxCyclesPerDay = cyclesForInterval(c.IntervalSeconds)
+		c.MaxCyclesPerDay = quotaFor()
+	case scheduleWasMissing && c.MaxCyclesPerDay == cyclesForInterval(c.IntervalSeconds):
+		// 配额恰好等于"按单一间隔覆盖全天"的自动推导值，说明它也是自动算出来的。
+		// 排班把一天压到十几轮，这个配额继续留着会让界面显示"0/240"，
+		// 用户会以为还有很多额度——额度本身不超支，但它会掩盖真实的调度节奏。
+		// 只有恰好相等才重算：手改过的值（比如 12）不会被这一步覆盖。
+		c.MaxCyclesPerDay = quotaFor()
+	}
+	if c.MaxCyclesPerDay > 240 {
+		c.MaxCyclesPerDay = 240
 	}
 	if strings.TrimSpace(c.AccountID) == "" {
 		c.AccountID = defaults.AccountID
@@ -210,16 +325,17 @@ func (c AutopilotConfig) Normalize() AutopilotConfig {
 }
 
 // parseClock 解析 "HH:MM"。返回当天的分钟数。
+//
+// 用 time.Parse 而不是 fmt.Sscanf：Sscanf 的 %d 只读到数字就停，
+// 不管后面还剩什么，"9:3O"（字母 O）会被解析成 9:03 并当作合法值。
+// 配置里一个错字被静默吃成另一个时刻，比直接报错难查得多。
 func parseClock(value string) (int, error) {
 	value = strings.TrimSpace(value)
-	var hour, minute int
-	if _, err := fmt.Sscanf(value, "%d:%d", &hour, &minute); err != nil {
+	parsed, err := time.Parse("15:04", value)
+	if err != nil {
 		return 0, fmt.Errorf("时间格式应为 HH:MM：%s", value)
 	}
-	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
-		return 0, fmt.Errorf("时间超出范围：%s", value)
-	}
-	return hour*60 + minute, nil
+	return parsed.Hour()*60 + parsed.Minute(), nil
 }
 
 // DayState 是当日账户状态：基准权益、连续亏损计数、熔断事实。

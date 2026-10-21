@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -230,7 +231,7 @@ func (a *Autopilot) tick() {
 			})
 			// 与定时轮次一样先推进下一次时间：事件触发失败不能原地重试，
 			// 否则一次行情中断会变成每 15 秒一次的模型调用。
-			a.setNext(now.Add(time.Duration(config.IntervalSeconds) * time.Second))
+			a.setNext(now.Add(time.Duration(config.IntervalAt(now)) * time.Second))
 			if _, err := a.RunCycle(ctx, CycleTriggerEvent); err != nil {
 				a.logf("event=autopilot_event_cycle_failed err=%v", err)
 				a.recordFailure(ctx, accountID, err)
@@ -242,7 +243,9 @@ func (a *Autopilot) tick() {
 	}
 	// 先推进下一次时间再执行：一轮失败时不能原地重试，
 	// 否则模型超时会变成每 15 秒一次的重试风暴。
-	a.setNext(now.Add(time.Duration(config.IntervalSeconds) * time.Second))
+	// 间隔按当前时刻查排班表：开盘与尾盘密、盘中稀，
+	// 因为 A 股 T+1 下盘中高频决策拿不到额外信息，却要按轮付费。
+	a.setNext(now.Add(time.Duration(config.IntervalAt(now)) * time.Second))
 
 	// 当日已熔断：只撮合既有挂单，不再调模型开新仓。
 	// 熔断的意义就是"今天到此为止"，继续用模型碰运气等于没有熔断。
@@ -530,11 +533,7 @@ func (a *Autopilot) RunCycle(ctx context.Context, trigger CycleTrigger) (Cycle, 
 	cycle.Gates = append(cycle.Gates, CycleGate{Code: GateKillSwitch, Label: "账户总闸", Open: true, Detail: control.Gate()})
 
 	// 4. 当日轮次配额（防呆，不防风险）。
-	dayStart := a.dayStart(now)
-	used, err := a.store.CountCyclesSince(ctx, accountID, dayStart)
-	if err != nil {
-		a.logf("event=autopilot_quota_count_failed err=%v", err)
-	}
+	used := a.usedCyclesForQuota(ctx, accountID, now)
 	if automatic && used >= config.MaxCyclesPerDay {
 		cycle.Gates = append(cycle.Gates, CycleGate{Code: GateCycleQuota, Label: "当日轮次", Open: false,
 			Detail: fmt.Sprintf("已用 %d/%d 轮", used, config.MaxCyclesPerDay)})
@@ -919,9 +918,9 @@ func (a *Autopilot) Status(ctx context.Context, accountID string) (AutopilotStat
 	if cycles, err := a.store.ListCycles(ctx, accountID, 1); err == nil && len(cycles) > 0 {
 		status.LastCycle = &cycles[0]
 	}
-	if used, err := a.store.CountCyclesSince(ctx, accountID, a.dayStart(now)); err == nil {
-		status.CyclesToday = used
-	}
+	// 用与配额判断同一口径：配额改过之后，"已用"要从变更时刻重新算，
+	// 否则界面会显示"52 / 27"这种自相矛盾的组合，用户以为系统卡住了。
+	status.CyclesToday = a.usedCyclesForQuota(ctx, accountID, now)
 	// 回撤状态是跨日事实，必须单独读出来放进状态：
 	// 它不在 DayState 里，前端只看当日熔断会漏掉"从高点掉了 10%"这件事。
 	risk, riskErr := a.store.GetRiskState(ctx, accountID)
@@ -963,20 +962,61 @@ func breakerDetail(state DayState, code string) string {
 	return state.BreakerDetail
 }
 
+// quotaRebaseKey 记录"配额最近一次被改动时，当天已经用掉多少轮"。
+// 配额是"这次配置下能跑多少轮"，不是"今天绝对不许超过多少轮"：
+// 把配额从 240 调到 27，不该让当天已跑的 52 轮把剩下半天全部锁死——
+// 那等于一个只影响以后几小时的设置，把当天剩余交易时间一并停掉。
+func quotaRebaseKey(accountID, day string) string {
+	return "cycle_quota_rebase:" + accountID + ":" + day
+}
+
+// usedCyclesForQuota 返回用于配额判断的轮次：当天实际轮次减去改动前的基线。
+func (a *Autopilot) usedCyclesForQuota(ctx context.Context, accountID string, now time.Time) int {
+	used, err := a.store.CountCyclesSince(ctx, accountID, a.dayStart(now))
+	if err != nil {
+		a.logf("event=autopilot_quota_count_failed err=%v", err)
+		return used
+	}
+	raw, ok, err := a.store.GetState(ctx, quotaRebaseKey(accountID, TradingDay(now)))
+	if err != nil || !ok {
+		return used
+	}
+	rebase, convErr := strconv.Atoi(raw)
+	if convErr != nil || rebase <= 0 || rebase > used {
+		// 坏值或不一致（例如日期基准变了）一律按"无基线"处理：
+		// 宁可少跑几轮，也不能让一条坏数据把额度放大。
+		return used
+	}
+	return used - rebase
+}
+
 // Configure 保存自动循环配置。关闭时不清除当日熔断：
 // 熔断是当日的事实，不能靠"先把开关关掉再打开"绕过去。
 func (a *Autopilot) Configure(ctx context.Context, config AutopilotConfig) (AutopilotConfig, error) {
 	config.AccountID = a.service.accountID(config.AccountID)
+	previous, previousErr := a.store.GetAutopilotConfig(ctx, config.AccountID)
 	saved, err := a.store.SaveAutopilotConfig(ctx, config)
 	if err != nil {
 		return AutopilotConfig{}, err
+	}
+	// 配额一变就重设基线：改配置的语义是"从这里重新开一个额度池"，
+	// 而不是"拿新额度去比今天的旧用量"。上一种解释会让降配额等于当天停摆。
+	if previousErr == nil && saved.MaxCyclesPerDay != previous.MaxCyclesPerDay {
+		now := a.now()
+		if used, countErr := a.store.CountCyclesSince(ctx, saved.AccountID, a.dayStart(now)); countErr == nil {
+			if setErr := a.store.SetState(ctx, quotaRebaseKey(saved.AccountID, TradingDay(now)), strconv.Itoa(used)); setErr != nil {
+				a.logf("event=autopilot_quota_rebase_failed err=%v", setErr)
+			} else {
+				a.logf("event=autopilot_quota_rebased account=%s quota=%d rebase=%d", saved.AccountID, saved.MaxCyclesPerDay, used)
+			}
+		}
 	}
 	if saved.Enabled {
 		// 打开后尽快跑第一轮，而不是等满一个间隔。
 		a.setNext(a.now())
 	}
-	a.logf("event=autopilot_configured account=%s enabled=%t auto_execute=%t interval=%ds",
-		saved.AccountID, saved.Enabled, saved.AutoExecute, saved.IntervalSeconds)
+	a.logf("event=autopilot_configured account=%s enabled=%t auto_execute=%t interval=%ds quota=%d",
+		saved.AccountID, saved.Enabled, saved.AutoExecute, saved.IntervalSeconds, saved.MaxCyclesPerDay)
 	return saved, nil
 }
 
