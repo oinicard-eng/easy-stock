@@ -1,17 +1,18 @@
 // AI 交易员的导航信息架构：左侧分组导航 + 右侧视图区，与行情总览同一套布局语言。
-// 分组按使用流程划分：先看状态，再交易，然后看自动运行，最后复盘与运维。
+//
+// 分组依据是「使用者一天的操作流」，不是功能的技术归属：
+// 开盘先看状态（钱和系统在不在工作）→ 交易（选股、确认、持仓）→
+// 自动运行交给系统盯 → 收盘后复盘 → 出问题时去运维。
+// 每组内的页面数量刻意少：一个视图就是一件事，相关内容在页内分区，不摊成多个入口。
 
 export type TradingView =
 	| 'overview'
 	| 'market'
 	| 'planning'
 	| 'positions'
-	| 'plans'
 	| 'autopilot'
-	| 'timeline'
 	| 'performance'
 	| 'review'
-	| 'memory'
 	| 'ops';
 
 export type TradingNavModule = {
@@ -31,52 +32,57 @@ export const tradingNavGroups: TradingNavGroup[] = [
 		id: 'status',
 		name: '今日状态',
 		modules: [
-			{ id: 'overview', name: '账户总览', description: '资产、盈亏口径与健康状态' },
-			{ id: 'market', name: '市场环境', description: '市场状态判定，规则与模型共用' },
+			{ id: 'overview', name: '账户总览', description: '资产、盈亏与待办' },
+			{ id: 'market', name: '市场环境', description: '市场判定与仓位上限' },
 		],
 	},
 	{
 		id: 'trade',
 		name: '交易执行',
 		modules: [
-			{ id: 'planning', name: '选股与计划', description: '选股池、生成计划与逐笔确认' },
-			{ id: 'positions', name: '持仓与挂单', description: '防守线、冻结与复核痕迹' },
-			{ id: 'plans', name: '历史计划', description: '最近计划回看与重新打开' },
+			{ id: 'planning', name: '选股与计划', description: '生成、确认与历史计划' },
+			{ id: 'positions', name: '持仓与挂单', description: '防守线与在途委托' },
 		],
 	},
 	{
 		id: 'run',
 		name: '自动运行',
 		modules: [
-			{ id: 'autopilot', name: '运行控制', description: '启停、调度、熔断与回撤释放' },
-			{ id: 'timeline', name: '决策时间线', description: '每轮决策留痕，按日回放' },
+			{ id: 'autopilot', name: '自动运行', description: '启停、周期日志与时间线' },
 		],
 	},
 	{
 		id: 'learning',
 		name: '复盘学习',
 		modules: [
-			{ id: 'performance', name: '业绩与校准', description: '已实现结果与预测命中率' },
-			{ id: 'review', name: '交易复盘', description: '周期复盘与保护性动作' },
-			{ id: 'memory', name: '经验记忆', description: '跨轮次教训与同步状态' },
+			{ id: 'performance', name: '业绩与校准', description: '已实现结果与命中率' },
+			{ id: 'review', name: '复盘与记忆', description: '周期复盘与板块教训' },
 		],
 	},
 	{
 		id: 'ops',
 		name: '运维保障',
 		modules: [
-			{ id: 'ops', name: '健康与告警', description: '健康检查、告警通道与运维日志' },
+			{ id: 'ops', name: '健康与告警', description: '自检、告警通道与日志' },
 		],
 	},
 ];
 
 export const defaultTradingView: TradingView = 'overview';
 
+// 旧版视图 ID 的兼容映射：历史计划并入选股与计划、时间线并入自动运行、记忆并入复盘。
+const legacyViewAlias: Record<string, TradingView> = {
+	plans: 'planning',
+	timeline: 'autopilot',
+	memory: 'review',
+};
+
 export function resolveTradingView(hash: string): TradingView {
 	if (!hash.startsWith('#trading')) return defaultTradingView;
-	const candidate = hash.replace(/^#trading\/?/, '').split(/[?&]/)[0] as TradingView;
-	return tradingNavGroups.some((group) => group.modules.some((module) => module.id === candidate))
-		? candidate
+	const candidate = hash.replace(/^#trading\/?/, '').split(/[?&]/)[0];
+	const aliased = legacyViewAlias[candidate] ?? (candidate as TradingView);
+	return tradingNavGroups.some((group) => group.modules.some((module) => module.id === aliased))
+		? aliased
 		: defaultTradingView;
 }
 

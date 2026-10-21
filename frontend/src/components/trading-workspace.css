@@ -59,7 +59,15 @@
 .trading-nav button.active { border-color: var(--theme-amber-line, #7d6840); background: var(--theme-surface, #fff); color: var(--theme-amber, #b9770e); box-shadow: 0 5px 14px var(--theme-shadow, rgba(39, 89, 139, .08)); }
 .trading-nav button > span { display: grid; gap: 2px; min-width: 0; }
 .trading-nav button strong { color: var(--theme-text, #34465b); font-size: var(--fs-body); }
-.trading-nav button small { color: var(--theme-subtle, #8a96a5); font-size: var(--fs-desc); line-height: var(--lh-snug); overflow-wrap: anywhere; white-space: normal; }
+.trading-nav button small {
+	color: var(--theme-subtle, #8a96a5);
+	font-size: var(--fs-desc);
+	line-height: var(--lh-snug);
+	/* 描述只占一行：窄导航里换行的三行小字是「网页感」的主要来源。 */
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
 .trading-nav button.active strong { color: var(--theme-text, #26384e); }
 .trading-nav button em { padding: 2px 6px; border-radius: 999px; background: var(--theme-surface-soft, #edf1f5); color: var(--theme-subtle, #8a96a5); font-size: var(--fs-desc); font-style: normal; white-space: nowrap; }
 .trading-nav button.active em { background: var(--theme-amber-soft, #fffaf0); color: var(--theme-amber, #b9770e); }
@@ -85,20 +93,23 @@
 .trading-hero p { margin: 0; color: var(--theme-muted, #788697); font-size: var(--fs-body); }
 .trading-hero-side { display: flex; align-items: center; gap: 8px; }
 
-.trading-banner {
-	display: flex;
-	gap: 12px;
-	align-items: flex-start;
-	padding: 14px 16px;
-	border: 1px solid #b8761f;
-	border-radius: 12px;
-	background: var(--theme-surface-soft, rgba(237, 195, 110, .08));
-	color: var(--text);
+/* 模拟盘徽标：挂在 hero 标题旁的小身份标识，完整说明走悬浮提示。 */
+.trading-paper-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	margin-left: 10px;
+	padding: 2px 9px;
+	border: 1px solid var(--theme-amber-line, #7d6840);
+	border-radius: 999px;
+	background: var(--theme-amber-soft, #fffaf0);
+	color: var(--theme-amber, #b9770e);
+	font-size: var(--fs-desc);
+	font-weight: 500;
+	line-height: 1.6;
+	vertical-align: middle;
+	cursor: help;
 }
-
-.trading-banner svg { flex-shrink: 0; color: var(--amber, #edc36e); margin-top: 2px; }
-.trading-banner strong { display: block; font-size: var(--fs-body); }
-.trading-banner span { display: block; margin-top: 4px; font-size: var(--fs-small); color: var(--muted); line-height: var(--lh-reading); }
 
 /* 账户门控条：三态用左侧色条区分，避免只靠文字判断当前是否还能交易 */
 .trading-control {
@@ -159,29 +170,31 @@
 .trading-summary .down { color: var(--down, #2f9e6f); }
 
 /* 对账行：把"总资产变动"拆成已实现 + 浮动 + 残差。
-   用户能自己加一遍，就不必怀疑账错了。 */
+   用户能自己加一遍，就不必怀疑账错了。
+   视觉上是一行安静的脚注，不是警示横幅——只有残差非零时才提醒。 */
 .trading-pnl-check {
 	display: flex;
 	flex-wrap: wrap;
 	align-items: baseline;
-	gap: 6px 14px;
-	padding: 10px 14px;
-	border: 1px solid var(--line);
-	border-left: 3px solid var(--line);
-	border-radius: 10px;
-	font-size: var(--fs-small);
+	gap: 4px 14px;
+	padding: 7px 12px;
+	border: 0;
+	border-top: 1px dashed var(--line);
+	border-radius: 0;
+	font-size: var(--fs-desc);
+	color: var(--theme-muted, #788697);
 	font-variant-numeric: tabular-nums;
-	background: var(--theme-surface, #fff);
+	background: transparent;
 }
 
-.trading-pnl-check span { color: var(--text, inherit); }
-.trading-pnl-check em { font-style: normal; color: var(--muted); }
-.trading-pnl-check b { margin-left: auto; font-weight: 600; }
+.trading-pnl-check span { color: var(--theme-muted, #788697); }
+.trading-pnl-check em { font-style: normal; color: var(--theme-subtle, #8a96a5); }
+.trading-pnl-check b { margin-left: auto; font-weight: 500; }
 
-.trading-pnl-check.ok { border-left-color: var(--down, #2f9e6f); }
-.trading-pnl-check.ok b { color: var(--down, #2f9e6f); }
-.trading-pnl-check.warn { border-left-color: #d68b00; }
-.trading-pnl-check.warn b { color: #b87400; }
+.trading-pnl-check.ok { border-top-color: var(--line); }
+.trading-pnl-check.ok b { color: var(--theme-subtle, #8a96a5); }
+.trading-pnl-check.warn { border-top-color: #d68b00; color: var(--text, inherit); }
+.trading-pnl-check.warn b { color: #b87400; font-weight: 600; }
 
 .trading-notice {
 	display: flex;
@@ -771,7 +784,7 @@
 .trading-auto-last { margin: 0; font-size: var(--fs-small); color: var(--muted); }
 
 /* 交易员日志：一轮一张卡，闸门状态决定它是"跳过"还是"被拦" */
-.trading-cycles { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.trading-cycles { list-style: none; margin: 0; padding: 2px 8px 2px 0; display: grid; gap: 10px; max-height: 520px; overflow-y: auto; }
 .trading-cycles > li {
 	display: grid;
 	gap: 8px;
@@ -1193,7 +1206,7 @@
 /* ── 情景记忆 ────────────────────────────────────────────────
    一条记忆 = 一次交易的现场。排版按"谁、什么时候、什么环境、结果"
    四段横向对齐，扫一眼就能比出哪次亏得冤。 */
-.trading-memories { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.trading-memories { list-style: none; margin: 0; padding: 2px 8px 2px 0; display: grid; gap: 8px; max-height: 420px; overflow-y: auto; }
 
 .trading-memories li {
 	border: 1px solid var(--line);
@@ -1289,10 +1302,13 @@
 .trading-timeline {
 	list-style: none;
 	margin: 0;
-	padding: 0 0 0 10px;
+	padding: 4px 8px 4px 10px;
 	display: grid;
 	gap: 4px;
 	border-left: 1px solid var(--line);
+	/* 时间线并入自动运行页后，按日回放可能很长：面板内滚动，符合桌面软件习惯。 */
+	max-height: 560px;
+	overflow-y: auto;
 }
 
 .trading-timeline-item {
@@ -1647,12 +1663,6 @@
 }
 
 /* ===== 精修：与系统卡片语言对齐 ===== */
-
-/* 横幅压成一行，不再每个视图吃掉一大块高度 */
-.trading-banner { align-items: center; gap: 10px; padding: 10px 14px; border-radius: 10px; }
-.trading-banner svg { margin-top: 0; }
-.trading-banner strong { display: inline; font-size: var(--fs-small); }
-.trading-banner span { display: inline; margin-top: 0; font-size: var(--fs-desc); }
 
 /* 门控格：状态与总闸同格，操作按钮缩小放进卡片 */
 .trading-status-tile.gate { cursor: default; }

@@ -9,6 +9,7 @@ import {
 	ChevronDown,
 	ChevronUp,
 	Compass,
+	FlaskConical,
 	Gauge,
 	GitCompareArrows,
 	History,
@@ -133,12 +134,9 @@ const tradingModuleIcons = {
 	market: Activity,
 	planning: Sparkles,
 	positions: Wallet,
-	plans: History,
 	autopilot: PowerCircle,
-	timeline: CalendarClock,
 	performance: GitCompareArrows,
 	review: Compass,
-	memory: Brain,
 	ops: ShieldCheck,
 } satisfies Record<TradingView, typeof Gauge>;
 
@@ -209,7 +207,7 @@ function MarketPanel({ market, onRefresh, busy }: { market: TradeMarketView; onR
 					<strong>{amountText(breadth.total_amount)}</strong>
 				</div>
 			</div>
-			<details className="trading-details">
+			<details className="trading-details" open>
 				<summary>
 					<ChevronDown size={13} /> 判断依据与行业强度
 				</summary>
@@ -1245,6 +1243,9 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 
 	const openPlanById = async (planId: string) => {
 		if (!config) return;
+		// 计划详情只存在于「选股与计划」页：从日志或历史点开一条计划，
+		// 必须同时切到那一页，否则点了没有任何可见反应。
+		selectTradingView('planning');
 		try {
 			setActive(await fetchTradePlan(config, planId));
 		} catch (cause) {
@@ -1342,7 +1343,17 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 				<header className="trading-hero">
 					<div>
 						<span>{findTradingGroupName(activeView)}</span>
-						<h2>{activeTradingModule.name}</h2>
+						<h2>
+							{activeTradingModule.name}
+							{/* 模拟盘身份从每页一条大横幅降级为标题旁的徽标：身份信息一眼可见，
+							    但不再在每个视图吃掉一行高度。完整说明放悬浮提示。 */}
+							<span
+								className="trading-paper-chip"
+								title="这是模拟盘，不接券商、不会产生真实委托。模型只负责给出方向与权重，股数、费用、涨跌停与风控校验全部由本机代码计算；所有计划需你确认后才会进入模拟撮合。"
+							>
+								<FlaskConical size={12} /> 模拟盘
+							</span>
+						</h2>
 						<p>{activeTradingModule.description}</p>
 					</div>
 					<div className="trading-hero-side">
@@ -1351,16 +1362,6 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 						</button>
 					</div>
 				</header>
-
-				<div className="trading-banner">
-					<ShieldAlert size={18} />
-					<div>
-						<strong>这是模拟盘，不接券商、不会产生真实委托。</strong>
-						<span>
-							模型只负责给出方向与权重，股数、费用、涨跌停与风控校验全部由本机代码计算；所有计划需你确认后才会进入模拟撮合。
-						</span>
-					</div>
-				</div>
 
 				{(error || message) && (
 					<div className={`trading-notice ${error ? 'error' : 'ok'}`}>
@@ -1434,27 +1435,6 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							</div>
 						</div>
 
-						<section className="trading-attention">
-							<header>
-								<ShieldAlert size={16} />
-								<h2>需要你处理</h2>
-								<span className="trading-subtle">{attention.length ? `${attention.length} 项待办` : '暂无待办'}</span>
-							</header>
-							{attention.length === 0 ? (
-								<p className="trading-subtle">当前没有需要你处理的事项：风控、账本与告警都在正常范围内。</p>
-							) : (
-								<ul>
-									{attention.slice(0, 6).map((item) => (
-										<li key={item.text} className={item.tone}>
-											<i aria-hidden="true" />
-											<span>{item.text}</span>
-											<button type="button" className="trading-link" onClick={() => selectTradingView(item.view)}>{item.action}</button>
-										</li>
-									))}
-								</ul>
-							)}
-						</section>
-
 						<div className="trading-summary">
 							<article>
 								<header><Wallet size={15} /><span>总资产</span></header>
@@ -1488,6 +1468,28 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							</article>
 						</div>
 
+						{/* 待办放在资产之后：先知道自己有多少钱，再决定要不要处理这些事。 */}
+						<section className="trading-attention">
+							<header>
+								<ShieldAlert size={16} />
+								<h2>需要你处理</h2>
+								<span className="trading-subtle">{attention.length ? `${attention.length} 项待办` : '暂无待办'}</span>
+							</header>
+							{attention.length === 0 ? (
+								<p className="trading-subtle">当前没有需要你处理的事项：风控、账本与告警都在正常范围内。</p>
+							) : (
+								<ul>
+									{attention.slice(0, 6).map((item) => (
+										<li key={item.text} className={item.tone}>
+											<i aria-hidden="true" />
+											<span>{item.text}</span>
+											<button type="button" className="trading-link" onClick={() => selectTradingView(item.view)}>{item.action}</button>
+										</li>
+									))}
+								</ul>
+							)}
+						</section>
+
 						{/* 两个数字口径不同，必须有一行把中间项摆出来。
 						    少了它，"总资产 -630"和"浮动 +672"看上去就是矛盾的。 */}
 						{account?.account.pnl && (
@@ -1506,8 +1508,6 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 								</b>
 							</div>
 						)}
-
-						<HealthBar health={health} channel={channel} onRefresh={() => void loadOps()} />
 					</>
 				)}
 
@@ -1530,6 +1530,9 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 								<div key={name}><i>{index + 1}</i><span><strong>{name}</strong><small>{detail}</small></span></div>
 							))}
 						</div>
+						{/* 候选池是「选股」这一步的结果：它必须在生成计划之前被看到，
+						    否则用户不知道模型是在什么范围里选的。 */}
+						<UniversePanel board={board} loading={boardLoading} onRefresh={() => void loadBoard()} />
 						<div className="trading-grid">
 						<aside className="trading-panel">
 							<header>
@@ -1664,6 +1667,26 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							)}
 						</main>
 						</div>
+
+						{/* 历史计划放在同页底部而不是独立入口：点一条记录，详情立刻在上方「计划详情」
+						    里可见，不需要在两个页面之间来回跳。 */}
+						{plans.length > 0 && (
+							<section className="trading-panel">
+								<header><History size={17} /><h2>历史计划</h2><span className="trading-subtle">最近 10 份 · 点击在上方查看详情</span></header>
+								<ul className="trading-history">
+									{plans.map((plan) => (
+										<li key={plan.id}>
+											<button type="button" className={active?.id === plan.id ? 'active' : ''} onClick={() => void openPlanById(plan.id)}>
+												<strong>{plan.regime || '未标注'}</strong>
+												<span>{new Date(plan.created_at).toLocaleString('zh-CN')}</span>
+												<em className={`trading-status ${plan.status}`}>{tradePlanStatusText[plan.status]}</em>
+												<small>{(plan.orders ?? []).length} 笔 · {plan.summary?.slice(0, 40) || plan.error || '—'}</small>
+											</button>
+										</li>
+									))}
+								</ul>
+							</section>
+						)}
 					</>
 				)}
 
@@ -1788,32 +1811,6 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 					</>
 				)}
 
-				{activeView === 'plans' && (
-					<section className="trading-panel">
-						<header><Sparkles size={17} /><h2>历史计划</h2><span className="trading-subtle">最近 10 份</span></header>
-						<ul className="trading-history">
-							{plans.length === 0 && <li className="trading-empty">暂无历史计划</li>}
-							{plans.map((plan) => (
-								<li key={plan.id}>
-									<button type="button" className={active?.id === plan.id ? 'active' : ''} onClick={async () => {
-										if (!config) return;
-										try {
-											setActive(await fetchTradePlan(config, plan.id));
-										} catch (cause) {
-											setError(cause instanceof Error ? cause.message : '读取计划失败');
-										}
-									}}>
-										<strong>{plan.regime || '未标注'}</strong>
-										<span>{new Date(plan.created_at).toLocaleString('zh-CN')}</span>
-										<em className={`trading-status ${plan.status}`}>{tradePlanStatusText[plan.status]}</em>
-										<small>{(plan.orders ?? []).length} 笔 · {plan.summary?.slice(0, 40) || plan.error || '—'}</small>
-									</button>
-								</li>
-							))}
-						</ul>
-					</section>
-				)}
-
 				{activeView === 'autopilot' && (
 					<>
 						<AutopilotPanel
@@ -1826,17 +1823,16 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							onReleaseDrawdown={() => void handleReleaseDrawdown()}
 						/>
 						<CycleLog cycles={cycles} config={config} onOpenPlan={(planId) => void openPlanById(planId)} />
+						{/* 决策时间线与周期日志同页：两者都是「看系统干了什么」，
+						    区别只是时间线按日回放、日志看最近 20 轮。 */}
+						<TimelinePanel
+							day={timelineDay}
+							timeline={timeline}
+							loading={timelineLoading}
+							onChangeDay={setTimelineDay}
+							onRefresh={() => void loadTimeline(timelineDay)}
+						/>
 					</>
-				)}
-
-				{activeView === 'timeline' && (
-					<TimelinePanel
-						day={timelineDay}
-						timeline={timeline}
-						loading={timelineLoading}
-						onChangeDay={setTimelineDay}
-						onRefresh={() => void loadTimeline(timelineDay)}
-					/>
 				)}
 
 				{activeView === 'performance' && (
@@ -1847,26 +1843,27 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 				)}
 
 				{activeView === 'review' && (
-					<ReviewPanel
-						review={reviews[0] ?? null}
-						history={reviews}
-						trades={closedTrades}
-						busy={reviewBusy}
-						onRun={() => void handleRunReview()}
-						onRunProtective={() => void handleRunProtective()}
-					/>
-				)}
-
-				{activeView === 'memory' && (
-					<MemoryPanel
-						memories={memories}
-						busy={memoryBusy}
-						onSync={() => void handleSyncMemory()}
-					/>
+					<>
+						<ReviewPanel
+							review={reviews[0] ?? null}
+							history={reviews}
+							trades={closedTrades}
+							busy={reviewBusy}
+							onRun={() => void handleRunReview()}
+							onRunProtective={() => void handleRunProtective()}
+						/>
+						{/* 板块记忆与复盘同页：复盘回答「这轮哪里错了」，记忆回答「错完沉淀了什么」。 */}
+						<MemoryPanel
+							memories={memories}
+							busy={memoryBusy}
+							onSync={() => void handleSyncMemory()}
+						/>
+					</>
 				)}
 
 				{activeView === 'ops' && (
 					<>
+						<HealthBar health={health} channel={channel} onRefresh={() => void loadOps()} />
 						<AlertPanel
 							alerts={alerts}
 							health={health}

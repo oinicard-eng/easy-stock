@@ -16,7 +16,8 @@ describe('trading navigation', () => {
 	it('covers every view exactly once with unique ids', () => {
 		const ids = tradingNavGroups.flatMap((group) => group.modules.map((module) => module.id));
 		expect(new Set(ids).size).toBe(ids.length);
-		expect(ids).toEqual(expect.arrayContaining(['overview', 'market', 'planning', 'positions', 'plans', 'autopilot', 'timeline', 'performance', 'review', 'memory', 'ops']));
+		// 8 个视图：plans 并入 planning、timeline 并入 autopilot、memory 并入 review。
+		expect(ids).toEqual(['overview', 'market', 'planning', 'positions', 'autopilot', 'performance', 'review', 'ops']);
 	});
 
 	it('resolves supported trading hashes and falls back to overview', () => {
@@ -28,6 +29,12 @@ describe('trading navigation', () => {
 		expect(resolveTradingView('#trading/unknown')).toBe(defaultTradingView);
 		// 其他工作区的 hash 不应解析出交易视图。
 		expect(resolveTradingView('#market/pulse')).toBe(defaultTradingView);
+	});
+
+	it('maps legacy view ids to their merged homes', () => {
+		expect(resolveTradingView('#trading/plans')).toBe('planning');
+		expect(resolveTradingView('#trading/timeline')).toBe('autopilot');
+		expect(resolveTradingView('#trading/memory')).toBe('review');
 	});
 
 	it('finds modules and group names', () => {
