@@ -359,3 +359,67 @@ func TestBoardOfRecognizesBoards(t *testing.T) {
 		}
 	}
 }
+
+// 模型分必须真实参与排序：两批基础面完全相同、只有模型分位不同的标的，
+// 在注入模型分后排名应该反转；不注入（或权重为 0）时结果必须与原来一致。
+func TestModelScoreChangesRanking(t *testing.T) {
+	base := append(noise(600, "综合"),
+		entry("600999.SH", "甲股", "综合甲", 12, 0.8, 2.0, 9e8),
+		entry("000999.SZ", "乙股", "综合乙", 12, 0.8, 2.0, 9e8))
+	market := marketOf(base, time.Now())
+
+	plain := Build(base, market, DefaultOptions())
+	firstRank := map[string]int{}
+	for _, candidate := range plain.Candidates {
+		firstRank[candidate.Symbol] = candidate.Rank
+	}
+	if firstRank["600999.SH"] == 0 || firstRank["000999.SZ"] == 0 {
+		t.Fatalf("两只对照股都应进入候选池：%v", firstRank)
+	}
+
+	// 权重 0：与不注入完全一致（回归保护）。
+	zeroOptions := DefaultOptions()
+	zeroOptions.ModelScores = map[string]float64{"600999.SH": 0.99, "000999.SZ": 0.01}
+	zeroOptions.ModelWeight = 0
+	zero := Build(base, market, zeroOptions)
+	zeroRank := map[string]int{}
+	for _, candidate := range zero.Candidates {
+		zeroRank[candidate.Symbol] = candidate.Rank
+	}
+	if zeroRank["600999.SH"] != firstRank["600999.SH"] || zeroRank["000999.SZ"] != firstRank["000999.SZ"] {
+		t.Fatalf("权重 0 不应改变排序：改前 %v/%v，改后 %v/%v",
+			firstRank["600999.SH"], firstRank["000999.SZ"], zeroRank["600999.SH"], zeroRank["000999.SZ"])
+	}
+
+	// 权重 20：模型分位高的甲股应排到乙股前面。
+	modelOptions := zeroOptions
+	modelOptions.ModelWeight = 20
+	modeled := Build(base, market, modelOptions)
+	modeledRank := map[string]int{}
+	for _, candidate := range modeled.Candidates {
+		modeledRank[candidate.Symbol] = candidate.Rank
+	}
+	if modeledRank["600999.SH"] >= modeledRank["000999.SZ"] {
+		t.Fatalf("模型分位 0.99 的甲股应排在 0.01 的乙股前面：实际 %d vs %d",
+			modeledRank["600999.SH"], modeledRank["000999.SZ"])
+	}
+	for _, candidate := range modeled.Candidates {
+		if candidate.Score < 0 || candidate.Score > 100 {
+			t.Fatalf("%s 分数 %.2f 越界，注入模型分后仍应在 0~100", candidate.Symbol, candidate.Score)
+		}
+	}
+}
+
+// 模型没覆盖到的标的必须得到中性分：既不能被顶到前排，也不能被踢出候选。
+func TestModelScoreNeutralForUncovered(t *testing.T) {
+	if got := modelScoreOf("600000.SH", nil); got != 50 {
+		t.Fatalf("空模型分数应给中性 50，实际 %.1f", got)
+	}
+	scores := map[string]float64{"600000.SH": 0.5, "600001.SH": -0.3, "600002.SH": 1.5}
+	cases := map[string]float64{"600000.SH": 60, "600001.SH": 50, "600002.SH": 100, "600003.SH": 50}
+	for symbol, want := range cases {
+		if got := modelScoreOf(symbol, scores); got != want {
+			t.Fatalf("modelScoreOf(%s) = %.1f, want %.1f", symbol, got, want)
+		}
+	}
+}

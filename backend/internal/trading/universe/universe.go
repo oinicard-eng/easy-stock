@@ -150,6 +150,14 @@ type Options struct {
 	// 取默认值时按 Limit 的 3 倍（下限 60，上限 150）：位置超限率实测约四成
 	// （2026-10-21 是 28 只里的 13 只），窗口等于 Limit 会把池子筛不满。
 	PositionWindow int
+	// ModelScores 是外部模型给每只标的的分数分位（0~1，1 为全市场最高）。
+	// 由调用方注入（当前来源是 QuantMind universe 排名）；为 nil 或空时
+	// 打分与引入该字段之前完全一致。
+	ModelScores map[string]float64
+	// ModelWeight 是模型分在合成分里的权重（百分点，0~90）。
+	// 为 0 时模型分不参与打分。注入后五个基础维度按 (100-w)/100
+	// 等比缩放，合成分量纲保持 0~100 不变。
+	ModelWeight int
 }
 
 // DefaultOptions 是经过取舍的默认参数。
@@ -319,7 +327,7 @@ func Build(entries []foundation.StockCatalogEntry, market cognition.MarketView, 
 	}
 	for index, entry := range liquid {
 		heat := industryRank[entry.Industry]
-		scores[index] = scoreOf(entry, heat, industryTotal, minLogAmount, maxLogAmount)
+		scores[index] = scoreOf(entry, heat, industryTotal, minLogAmount, maxLogAmount, options)
 	}
 
 	order := make([]int, len(liquid))
@@ -500,16 +508,46 @@ func PositionBlockReason(position Position, limits EntryLimits) string {
 
 // scoreOf 计算 0~100 的合成分。每个维度都做了"过热惩罚"，
 // 因为线性追涨会把仓位集中到已经涨完的标的上。
-func scoreOf(entry foundation.StockCatalogEntry, heat cognition.IndustryHeat, industryTotal int, minLog, maxLog float64) float64 {
+//
+// ModelWeight 大于 0 且 ModelScores 非空时，模型分作为一个额外维度参与：
+// 五个基础维度等比缩放到 (100-w)/100，模型分占 w。权重上限 90——
+// 模型可以是重要参考，但不能整体接管打分：它的历史窗口只有二十几个
+// 交易日，把全部权重交给一段行情的幸存者，等于把风控外包给黑盒。
+func scoreOf(entry foundation.StockCatalogEntry, heat cognition.IndustryHeat, industryTotal int, minLog, maxLog float64, options Options) float64 {
 	momentum := momentumScore(entry.ChangePercent, marketrule.PriceLimitPercent(entry.Symbol, entry.Name))
 	trend := trendScore(entry.FiveDayChangePercent)
 	liquidity := liquidityScore(math.Log10(math.Max(entry.Amount, 1)), minLog, maxLog)
 	industry := industryScore(heat, industryTotal)
 	relative := relativeScore(entry.ChangePercent, heat)
 
-	total := momentum*weightMomentum + trend*weightTrend + liquidity*weightLiquidity +
+	base := momentum*weightMomentum + trend*weightTrend + liquidity*weightLiquidity +
 		industry*weightIndustry + relative*weightRelativeStrength
-	return total / 100
+
+	weight := options.ModelWeight
+	if weight <= 0 || len(options.ModelScores) == 0 {
+		return base / 100
+	}
+	if weight > 90 {
+		weight = 90
+	}
+	scale := float64(100-weight) / 100
+	model := modelScoreOf(entry.Symbol, options.ModelScores) * float64(weight)
+	return (base*scale + model) / 100
+}
+
+// modelScoreOf 把模型分数分位（0~1）映射到 0~100：分位 1 → 100，0 → 20。
+// 模型没覆盖到的标的给 50（中性）：不吃亏也不占便宜，与 relativeScore
+// 缺行业数据时的处理一致。QuantMind 的 universe 覆盖全市场，实际缺分
+// 只出现在数据迟到或新上市的头一两天。
+func modelScoreOf(symbol string, scores map[string]float64) float64 {
+	pct, ok := scores[symbol]
+	if !ok || pct < 0 {
+		return 50
+	}
+	if pct > 1 {
+		pct = 1
+	}
+	return 20 + pct*80
 }
 
 // momentumScore 刻意做成倒 U 型：当日涨幅 3%~6% 为最优区间，之后逐级扣分。

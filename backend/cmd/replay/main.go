@@ -57,17 +57,19 @@ type series struct {
 }
 
 type options struct {
-	symbols     int
-	concurrency int
-	hold        int
-	limit       int
-	warmup      int
-	cacheDir    string
-	refresh     bool
-	baseURL     string
-	tenant      string
-	user        string
-	pass        string
+	symbols      int
+	concurrency  int
+	hold         int
+	limit        int
+	warmup       int
+	cacheDir     string
+	refresh      bool
+	baseURL      string
+	tenant       string
+	user         string
+	pass         string
+	modelDir     string
+	modelWeights string
 }
 
 func main() {
@@ -83,6 +85,8 @@ func main() {
 	flag.StringVar(&opt.tenant, "tenant", envOr("A_STOCK_QUANTMIND_TENANT", ""), "QuantMind 租户")
 	flag.StringVar(&opt.user, "user", envOr("A_STOCK_QUANTMIND_USER", ""), "QuantMind 账号")
 	flag.StringVar(&opt.pass, "pass", envOr("A_STOCK_QUANTMIND_PASSWORD", ""), "QuantMind 密码")
+	flag.StringVar(&opt.modelDir, "model-dir", ".runtime/qm-universe", "模型分数快照目录（空串跳过模型分变体）")
+	flag.StringVar(&opt.modelWeights, "model-weights", "10,20,30", "模型分权重候选（逗号分隔的百分点）")
 	flag.Parse()
 
 	if err := run(opt); err != nil {
@@ -111,9 +115,45 @@ func run(opt options) error {
 	}
 	fmt.Printf("日线就绪 %d 只，开始逐日回放…\n\n", len(seriesList))
 
-	report := replay(seriesList, opt)
+	var modelSnapshots map[string]map[string]float64
+	weights := parseWeights(opt.modelWeights)
+	if opt.modelDir != "" {
+		modelSnapshots, err = loadModelSnapshots(opt.modelDir)
+		if err != nil {
+			fmt.Printf("模型分快照不可读（%v），跳过模型分变体\n", err)
+			modelSnapshots = nil
+		} else if len(weights) == 0 {
+			fmt.Println("模型分权重为空，跳过模型分变体")
+		} else {
+			fmt.Printf("模型分快照 %d 天，权重候选 %v\n", len(modelSnapshots), weights)
+		}
+	}
+
+	report := replay(seriesList, opt, modelSnapshots, weights)
 	printReport(report, opt)
 	return nil
+}
+
+func parseWeights(raw string) []int {
+	out := []int{}
+	for _, part := range strings.Split(raw, ",") {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		n := 0
+		for _, ch := range value {
+			if ch < '0' || ch > '9' {
+				n = -1
+				break
+			}
+			n = n*10 + int(ch-'0')
+		}
+		if n > 0 && n <= 90 {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------- 标的与数据
@@ -292,14 +332,67 @@ type report struct {
 	// positionEmptyDays 是"改前有得选、改后一只都不剩"的天数——
 	// 与 emptyDays 分开统计，否则会把"市场恐慌不开仓"算到位置筛选头上。
 	positionEmptyDays int
+	// models 是"位置筛选 + 模型分"的若干权重变体。与 filtered 用同一批
+	// 标的、同一套位置门禁，唯一差异是合成分里模型分占的百分点，
+	// 因此组间差异可以全部归因于模型分。
+	models []variant
+	// filteredOnModelDays 是位置筛选基线在"有模型快照的那几天"的子集。
+	// 模型变体只在快照日累计，直接拿它们跟全窗口的 filtered 比会失真：
+	// 必须给一个同天数的对照。
+	filteredOnModelDays variant
 }
 
-func replay(list []series, opt options) report {
+// loadModelSnapshots 读取 QuantMind universe 历史排名，折算成分位。
+//
+// 输入是救援脚本落地的 YYYYMMDD.json（rank/score/sector）， rank 越小
+// 越好。这里只留分位（1 - (rank-1)/total），不保留原始 score——原始分
+// 的量纲随模型版本漂移，分位才是稳定输入。
+func loadModelSnapshots(dir string) (map[string]map[string]float64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]map[string]float64, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "20") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		date := name[:4] + "-" + name[4:6] + "-" + name[6:8]
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		var rows []struct {
+			Rank int    `json:"rank"`
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(raw, &rows) != nil || len(rows) == 0 {
+			continue
+		}
+		scores := make(map[string]float64, len(rows))
+		total := float64(len(rows))
+		for _, row := range rows {
+			if row.Code == "" || row.Rank <= 0 {
+				continue
+			}
+			scores[row.Code] = 1 - float64(row.Rank-1)/total
+		}
+		out[date] = scores
+	}
+	return out, nil
+}
+
+func replay(list []series, opt options, modelSnapshots map[string]map[string]float64, weights []int) report {
 	dates, index := calendarOf(list)
 	result := report{days: 0, start: dates[0], end: dates[len(dates)-1]}
 	result.baseline.name = "仅打分（改前）"
 	result.filtered.name = "打分+位置筛选（改后）"
 	result.skippedDays.name = "改后清空的日子里，改前"
+	for _, weight := range weights {
+		result.models = append(result.models, variant{name: fmt.Sprintf("位置筛+模型分 w=%d", weight)})
+	}
+	result.filteredOnModelDays.name = "位置筛(仅模型日)"
 
 	rules := policy.Default().Normalize()
 	limits := universe.EntryLimits{
@@ -342,6 +435,23 @@ func replay(list []series, opt options) report {
 		}
 		collect(&result.baseline, boardBase, forward)
 		collect(&result.filtered, boardFiltered, forward)
+
+		// 模型分变体：与 filtered 完全同构（同一批标的、同一套位置门禁），
+		// 只在合成分里掺入 QuantMind 分位。当天没有快照就整体跳过，
+		// 不让缺失日稀释组间比较。
+		if len(result.models) > 0 {
+			dayScores := modelSnapshots[dates[dayIndex]]
+			if dayScores != nil {
+				collect(&result.filteredOnModelDays, boardFiltered, forward)
+				for vi, weight := range weights {
+					modelOptions := filteredOptions
+					modelOptions.ModelScores = dayScores
+					modelOptions.ModelWeight = weight
+					boardModel := universe.Build(entries, market, modelOptions)
+					collect(&result.models[vi], boardModel, forward)
+				}
+			}
+		}
 	}
 	return result
 }
@@ -522,6 +632,12 @@ func printReport(result report, opt options) {
 	fmt.Printf("%-16s %10s %10s %10s %8s\n", "版本", "候选/日", "5日均收益", "前5名收益", "胜率")
 	printVariant(result.baseline, result.days)
 	printVariant(result.filtered, result.days)
+	if result.models != nil && len(result.models) > 0 {
+		printVariant(result.filteredOnModelDays, result.days)
+	}
+	for i := range result.models {
+		printVariant(result.models[i], result.days)
+	}
 	fmt.Println()
 	fmt.Printf("位置筛选：平均每日剔除 %.1f 只；候选池被清空 %d 天（%.1f%%）\n",
 		float64(result.excluded)/float64(result.days), result.emptyDays,
@@ -544,8 +660,13 @@ func printReport(result report, opt options) {
 		fmt.Printf("%12s", name)
 	}
 	fmt.Println()
-	for _, item := range []variant{result.baseline, result.filtered} {
-		fmt.Printf("%-12s", item.name)
+	bucketVariants := []variant{result.baseline, result.filtered}
+	if len(result.models) > 0 {
+		bucketVariants = append(bucketVariants, result.filteredOnModelDays)
+	}
+	bucketVariants = append(bucketVariants, result.models...)
+	for _, item := range bucketVariants {
+		fmt.Printf("%-20s", item.name)
 		for bucket := 0; bucket < 5; bucket++ {
 			if item.bucketCount[bucket] == 0 {
 				fmt.Printf("%12s", "-")
@@ -558,6 +679,14 @@ func printReport(result report, opt options) {
 
 	fmt.Printf("\n结论：候选池平均 5 日收益 %+.3f%% → %+.3f%%（%+.3f 个百分点），前 5 名 %+.3f%% → %+.3f%%\n",
 		base, after, after-base, topMean(result.baseline), topMean(result.filtered))
+	if len(result.models) > 0 {
+		reference := meanOf(result.filteredOnModelDays)
+		fmt.Printf("      模型日对照：位置筛 %+.3f%%（同 21 个快照日）\n", reference)
+		for _, item := range result.models {
+			fmt.Printf("      %s：平均 %+.3f%%（对比模型日位置筛 %+.3f 个百分点），前 5 名 %+.3f%%\n",
+				item.name, meanOf(item), meanOf(item)-reference, topMean(item))
+		}
+	}
 }
 
 func printVariant(item variant, days int) {
