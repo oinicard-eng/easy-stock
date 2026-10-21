@@ -98,6 +98,7 @@ import {
 	type TradeMemory,
 	type TradeOrder,
 	type TradePerformance,
+	type TradeDailyPnL,
 	type TradeCalibration,
 	type TradePlan,
 	type TradeCooldownView,
@@ -134,7 +135,6 @@ const tradingModuleIcons = {
 	overview: Gauge,
 	market: Activity,
 	planning: Sparkles,
-	positions: Wallet,
 	autopilot: PowerCircle,
 	performance: GitCompareArrows,
 	review: Compass,
@@ -166,10 +166,24 @@ function intervalText(seconds: number): string {
 }
 
 /** 市场环境：确定性统计结果，与生成计划时用的是同一套计算。 */
-function MarketPanel({ market, onRefresh, busy }: { market: TradeMarketView; onRefresh: () => void; busy: boolean }) {
+function MarketPanel({
+	market,
+	onRefresh,
+	busy,
+	positionPercent,
+}: {
+	market: TradeMarketView;
+	onRefresh: () => void;
+	busy: boolean;
+	positionPercent?: number;
+}) {
 	const breadth = market.breadth;
 	// 行业条形图的比例尺：以最强行业为 100%，纯展示换算，不改任何数据。
 	const industryMax = Math.max(...(market.industries ?? []).map((item) => Math.abs(item.average_change)), 0.01);
+	// 仓位预算对照：判定只有翻译成「我还能买多少」才对使用者有意义。
+	const budgetPct = market.risk_budget_percent;
+	const positionPct = positionPercent ?? 0;
+	const overBudget = positionPct > budgetPct;
 	return (
 		<div className={`trading-view trading-view-market regime-${market.regime}`}>
 			<div className="trading-market-head">
@@ -180,13 +194,31 @@ function MarketPanel({ market, onRefresh, busy }: { market: TradeMarketView; onR
 							市场：{tradeRegimeText[market.regime] ?? market.label}
 						</strong>
 						<span>
-							权益仓位预算 {market.risk_budget_percent}% · 全市场 {breadth.total} 只有效行情
+							全市场 {breadth.total} 只有效行情
+							{market.taken_at ? ` · 评估于 ${new Date(market.taken_at).toLocaleString('zh-CN')}` : ''}
 						</span>
 					</div>
 				</div>
 				<button type="button" className="trading-ghost" onClick={onRefresh} disabled={busy}>
 					{busy ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />} 刷新
 				</button>
+			</div>
+			<div className="trading-budget-strip">
+				<div className="trading-budget-copy">
+					<span>当前仓位 {positionPercent != null ? `${positionPct.toFixed(1)}%` : '—'}</span>
+					<strong>权益预算上限 {budgetPct}%</strong>
+					<em className={overBudget ? 'warn' : ''}>
+						{positionPercent == null
+							? '等待账户数据'
+							: overBudget
+								? '已超预算：下一份计划只减不加'
+								: `距上限还有 ${(budgetPct - positionPct).toFixed(1)}% 可加仓`}
+					</em>
+				</div>
+				<div className="trading-budget-bar" role="img" aria-label={`当前仓位 ${positionPct.toFixed(1)}%，预算上限 ${budgetPct}%`}>
+					<i className={overBudget ? 'current over' : 'current'} style={{ width: `${Math.min(positionPct, 100)}%` }} />
+					<i className="mark" style={{ left: `${Math.min(budgetPct, 100)}%` }} />
+				</div>
 			</div>
 			<div className="trading-market-grid">
 				<div>
@@ -206,8 +238,24 @@ function MarketPanel({ market, onRefresh, busy }: { market: TradeMarketView; onR
 					<strong className={breadth.median_change >= 0 ? 'up' : 'down'}>{signedPercent(breadth.median_change)}</strong>
 				</div>
 				<div>
+					<span>平均涨幅</span>
+					<strong className={breadth.average_change >= 0 ? 'up' : 'down'}>{signedPercent(breadth.average_change)}</strong>
+				</div>
+				<div>
+					<span>涨跌比</span>
+					<strong>{(breadth.advance_ratio * 100).toFixed(1)}%</strong>
+				</div>
+				<div>
+					<span>平盘</span>
+					<strong>{breadth.unchanged}</strong>
+				</div>
+				<div>
 					<span>成交额</span>
 					<strong>{amountText(breadth.total_amount)}</strong>
+				</div>
+				<div>
+					<span>可交易标的</span>
+					<strong>{breadth.tradable}<small className="trading-subtle"> / {breadth.total}</small></strong>
 				</div>
 			</div>
 			{/* 桌面程序不折叠：判断依据与行业强度固定双栏展示，屏幕够宽就同时可见。 */}
@@ -238,6 +286,7 @@ function MarketPanel({ market, onRefresh, busy }: { market: TradeMarketView; onR
 									<div className="bar" aria-hidden="true"><i style={{ width: `${(Math.abs(item.average_change) / industryMax) * 100}%` }} /></div>
 									<strong>{signedPercent(item.average_change)}</strong>
 									<em>{item.advancing}/{item.total}</em>
+									<em className="leader" title={item.leader_name ? `龙头：${item.leader_name}` : ''}>{item.leader_name || '—'}</em>
 								</div>
 							))}
 						</div>
@@ -1304,7 +1353,7 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 
 	// 左侧导航的实时标记：不点进去也知道哪里有东西等着看。
 	const navBadges: Partial<Record<TradingView, string>> = {
-		positions: account?.positions?.length ? String(account.positions.length) : '',
+		overview: account?.positions?.length ? String(account.positions.length) : '',
 		planning: active?.status === 'draft' && actionableOrders.length > 0 ? `待确认 ${actionableOrders.length}` : '',
 		autopilot: autopilot ? (autopilot.running ? '运行中' : '已停止') : '',
 		ops: health && health.status !== 'healthy' ? '异常' : '',
@@ -1324,9 +1373,8 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 	if (active?.status === 'draft' && actionableOrders.length > 0) {
 		attention.push({ tone: 'info', text: `有 1 份待确认计划，${actionableOrders.length} 笔可执行`, view: 'planning', action: '去确认' });
 	}
-	if (pendingOrders.length > 0) {
-		attention.push({ tone: 'info', text: `${pendingOrders.length} 笔挂单等待限价触及`, view: 'positions', action: '看挂单' });
-	}
+	// 挂单不再单独提醒：持仓与挂单已并入账户总览，待办列表和挂单区在同一屏，
+	// 再放一条「看挂单」只会指向自己所在的页面。
 	if (account?.account.pnl && !account.account.pnl.aligned) {
 		attention.push({ tone: 'warn', text: `盈亏口径未对齐，残差 ${signedMoney(account.account.pnl.residual)}`, view: 'overview', action: '看口径' });
 	}
@@ -1639,11 +1687,138 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 								</p>
 							</section>
 						</div>
+					{/* 持仓与挂单归账户总览：交易软件首页就是「资金 + 持仓 + 委托」，
+					    单独一页只会让人在两个入口之间跳；这里与资产数字同屏互相印证。 */}
+						<section className="trading-panel">
+							<header>
+								<Wallet size={17} />
+								<h2>模拟持仓</h2>
+								<span className="trading-subtle">现价刷新自最近一次行情请求</span>
+							</header>
+							<div className="trading-table-wrap">
+								<table className="trading-table">
+									<thead>
+										<tr><th>标的</th><th>数量</th><th>可卖 / 冻结</th><th>成本</th><th>现价</th><th>浮动盈亏</th><th>防守线</th><th>操作</th></tr>
+									</thead>
+									<tbody>
+										{(!account || (account.positions ?? []).length === 0) && (
+											<tr><td colSpan={8} className="trading-empty-cell">当前空仓</td></tr>
+										)}
+										{account?.positions.map((position) => {
+											const sellable = position.available_quantity - (position.reserved_quantity ?? 0);
+											const profitPercent = position.average_cost > 0 ? ((position.last_price / position.average_cost - 1) * 100) : 0;
+											const editing = protection?.symbol === position.symbol;
+											return (
+												<Fragment key={position.symbol}>
+													<tr>
+														<td><strong>{position.symbol}</strong><span>{position.name}{position.sector ? ` · ${position.sector}` : ''}</span></td>
+														<td>{position.quantity} 股</td>
+														<td>
+															{sellable} 股
+															{(position.reserved_quantity ?? 0) > 0 && <span className="trading-subtle">（挂单 {position.reserved_quantity}）</span>}
+														</td>
+														<td>{position.average_cost.toFixed(3)}</td>
+														<td>{position.last_price.toFixed(2)}</td>
+														<td className={`trading-pnl-cell ${profitPercent >= 0 ? 'up' : 'down'}`}>
+															<strong>{position.unrealized_pnl >= 0 ? '+' : ''}{formatMoney(position.unrealized_pnl)}</strong>
+															<span>{profitPercent >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%</span>
+														</td>
+														<td>
+															<div className="trading-defense">
+																{position.stop_loss_price ? <span className="trading-line stop" title="止损">止损 {position.stop_loss_price.toFixed(2)}</span> : <span className="trading-line none">未设止损</span>}
+																{position.take_profit_price ? <span className="trading-line take" title="止盈">止盈 {position.take_profit_price.toFixed(2)}</span> : null}
+															</div>
+															{/* 失效条件与预期期限写在持仓上：它们是「这笔单什么时候算错」的承诺，
+															    比止损更容易被遗忘，因为它不是一个价格。 */}
+															{/* 入场置信度：复盘时回答「当时多有把握」，它比买入理由更客观——理由是叙述，置信度是当时的数字。 */}
+															{/* 复核轮次：证明这笔仓位不是买入后没人再看 */}
+															<div className="trading-defense-meta">
+																{(position.reduce_count ?? 0) > 0 && <span>已止盈 {position.reduce_count} 级</span>}
+																{(position.invalidation_rule?.price_below || position.invalidation) && (
+																	<span title={position.invalidation ?? ''}>
+																		失效 {position.invalidation_rule?.price_below ? `跌破 ${position.invalidation_rule.price_below.toFixed(2)}` : (position.invalidation ?? '').slice(0, 18)}
+																	</span>
+																)}
+																{position.expected_days ? <span>预期 {position.expected_days} 日</span> : null}
+																{position.entry_confidence ? <span title={position.entry_regime ? `建仓环境：${position.entry_regime}` : ''}>置信 {position.entry_confidence.toFixed(2)}</span> : null}
+																{position.review_count ? <span>复核 {position.review_count} 轮</span> : null}
+																{position.auto_reduce_at ? <span className="trading-chip">已自动减仓</span> : null}
+															</div>
+														</td>
+														<td>
+															<button type="button" className="trading-link" onClick={() => setProtection({
+																symbol: position.symbol,
+																stop: position.stop_loss_price ? String(position.stop_loss_price) : '',
+																takeProfit: position.take_profit_price ? String(position.take_profit_price) : '',
+															})}>
+																{editing ? '编辑中' : '改防守线'}
+															</button>
+															<button type="button" className="trading-link" onClick={() => setWatchlist((current) => (current ? `${current}, ${position.symbol}` : position.symbol))}>
+																加入关注池
+															</button>
+														</td>
+													</tr>
+													{editing && (
+														<tr className="trading-protection-row">
+															<td colSpan={8}>
+																<div className="trading-protection-form">
+																	<strong>{position.symbol} 防守线</strong>
+																	<label>止损价
+																		<input type="number" step="0.01" min="0" value={protection.stop}
+																			onChange={(event) => setProtection({ ...protection, stop: event.target.value })} />
+																	</label>
+																	<label>止盈价
+																		<input type="number" step="0.01" min="0" value={protection.takeProfit}
+																			onChange={(event) => setProtection({ ...protection, takeProfit: event.target.value })} />
+																	</label>
+																	<button type="button" className="trading-primary" onClick={() => void handleSaveProtection()}>保存</button>
+																	<button type="button" className="trading-link" onClick={() => setProtection(null)}>取消</button>
+																	<span className="trading-subtle">填 0 表示不设该防线；止损由系统每轮自动执行，不等模型同意。</span>
+																</div>
+															</td>
+														</tr>
+													)}
+												</Fragment>
+											);
+										})}
+									</tbody>
+								</table>
+							</div>
+						</section>
+
+						{/* 挂单区始终在页面上：有单看单，没单给空态。桌面程序不该有一块区域
+						    时有时无，位置稳定才能形成肌肉记忆。 */}
+						<section className="trading-panel">
+							<header><RefreshCw size={17} /><h2>挂单</h2><span className="trading-subtle">限价未触及前保持挂起</span></header>
+							{pendingOrders.length === 0 ? (
+								<p className="trading-empty">当前没有等待成交的挂单。计划确认后未触及限价的委托会出现在这里。</p>
+							) : (
+								<div className="trading-pending">
+									{pendingOrders.map((order) => (
+										<PendingOrder key={order.id} order={order} onCancel={async () => {
+											if (!config) return;
+											try {
+												await cancelTradeOrder(config, order.id);
+												setMessage('订单已撤销');
+												await loadPlans();
+											} catch (cause) {
+												setError(cause instanceof Error ? cause.message : '撤销失败');
+											}
+										}} />
+									))}
+								</div>
+							)}
+						</section>
 					</div>
 				)}
 
 				{activeView === 'market' && (board?.market?.evaluated ? (
-					<MarketPanel market={board.market} onRefresh={() => void loadBoard()} busy={boardLoading} />
+					<MarketPanel
+						market={board.market}
+						onRefresh={() => void loadBoard()}
+						busy={boardLoading}
+						positionPercent={account ? allocation.positionPercent : undefined}
+					/>
 				) : (
 					<p className="trading-empty">市场环境尚未加载，点击右上角「刷新数据」。</p>
 				))}
@@ -1828,130 +2003,6 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 					</div>
 				)}
 
-				{activeView === 'positions' && (
-					<div className="trading-view">
-						<section className="trading-panel">
-							<header>
-								<Wallet size={17} />
-								<h2>模拟持仓</h2>
-								<span className="trading-subtle">现价刷新自最近一次行情请求</span>
-							</header>
-							<div className="trading-table-wrap">
-								<table className="trading-table">
-									<thead>
-										<tr><th>标的</th><th>数量</th><th>可卖 / 冻结</th><th>成本</th><th>现价</th><th>浮动盈亏</th><th>防守线</th><th>操作</th></tr>
-									</thead>
-									<tbody>
-										{(!account || (account.positions ?? []).length === 0) && (
-											<tr><td colSpan={8} className="trading-empty-cell">当前空仓</td></tr>
-										)}
-										{account?.positions.map((position) => {
-											const sellable = position.available_quantity - (position.reserved_quantity ?? 0);
-											const profitPercent = position.average_cost > 0 ? ((position.last_price / position.average_cost - 1) * 100) : 0;
-											const editing = protection?.symbol === position.symbol;
-											return (
-												<Fragment key={position.symbol}>
-													<tr>
-														<td><strong>{position.symbol}</strong><span>{position.name}{position.sector ? ` · ${position.sector}` : ''}</span></td>
-														<td>{position.quantity} 股</td>
-														<td>
-															{sellable} 股
-															{(position.reserved_quantity ?? 0) > 0 && <span className="trading-subtle">（挂单 {position.reserved_quantity}）</span>}
-														</td>
-														<td>{position.average_cost.toFixed(3)}</td>
-														<td>{position.last_price.toFixed(2)}</td>
-														<td className={`trading-pnl-cell ${profitPercent >= 0 ? 'up' : 'down'}`}>
-															<strong>{position.unrealized_pnl >= 0 ? '+' : ''}{formatMoney(position.unrealized_pnl)}</strong>
-															<span>{profitPercent >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%</span>
-														</td>
-														<td>
-															<div className="trading-defense">
-																{position.stop_loss_price ? <span className="trading-line stop" title="止损">止损 {position.stop_loss_price.toFixed(2)}</span> : <span className="trading-line none">未设止损</span>}
-																{position.take_profit_price ? <span className="trading-line take" title="止盈">止盈 {position.take_profit_price.toFixed(2)}</span> : null}
-															</div>
-															{/* 失效条件与预期期限写在持仓上：它们是「这笔单什么时候算错」的承诺，
-															    比止损更容易被遗忘，因为它不是一个价格。 */}
-															{/* 入场置信度：复盘时回答「当时多有把握」，它比买入理由更客观——理由是叙述，置信度是当时的数字。 */}
-															{/* 复核轮次：证明这笔仓位不是买入后没人再看 */}
-															<div className="trading-defense-meta">
-																{(position.reduce_count ?? 0) > 0 && <span>已止盈 {position.reduce_count} 级</span>}
-																{(position.invalidation_rule?.price_below || position.invalidation) && (
-																	<span title={position.invalidation ?? ''}>
-																		失效 {position.invalidation_rule?.price_below ? `跌破 ${position.invalidation_rule.price_below.toFixed(2)}` : (position.invalidation ?? '').slice(0, 18)}
-																	</span>
-																)}
-																{position.expected_days ? <span>预期 {position.expected_days} 日</span> : null}
-																{position.entry_confidence ? <span title={position.entry_regime ? `建仓环境：${position.entry_regime}` : ''}>置信 {position.entry_confidence.toFixed(2)}</span> : null}
-																{position.review_count ? <span>复核 {position.review_count} 轮</span> : null}
-																{position.auto_reduce_at ? <span className="trading-chip">已自动减仓</span> : null}
-															</div>
-														</td>
-														<td>
-															<button type="button" className="trading-link" onClick={() => setProtection({
-																symbol: position.symbol,
-																stop: position.stop_loss_price ? String(position.stop_loss_price) : '',
-																takeProfit: position.take_profit_price ? String(position.take_profit_price) : '',
-															})}>
-																{editing ? '编辑中' : '改防守线'}
-															</button>
-															<button type="button" className="trading-link" onClick={() => setWatchlist((current) => (current ? `${current}, ${position.symbol}` : position.symbol))}>
-																加入关注池
-															</button>
-														</td>
-													</tr>
-													{editing && (
-														<tr className="trading-protection-row">
-															<td colSpan={8}>
-																<div className="trading-protection-form">
-																	<strong>{position.symbol} 防守线</strong>
-																	<label>止损价
-																		<input type="number" step="0.01" min="0" value={protection.stop}
-																			onChange={(event) => setProtection({ ...protection, stop: event.target.value })} />
-																	</label>
-																	<label>止盈价
-																		<input type="number" step="0.01" min="0" value={protection.takeProfit}
-																			onChange={(event) => setProtection({ ...protection, takeProfit: event.target.value })} />
-																	</label>
-																	<button type="button" className="trading-primary" onClick={() => void handleSaveProtection()}>保存</button>
-																	<button type="button" className="trading-link" onClick={() => setProtection(null)}>取消</button>
-																	<span className="trading-subtle">填 0 表示不设该防线；止损由系统每轮自动执行，不等模型同意。</span>
-																</div>
-															</td>
-														</tr>
-													)}
-												</Fragment>
-											);
-										})}
-									</tbody>
-								</table>
-							</div>
-						</section>
-
-						{/* 挂单区始终在页面上：有单看单，没单给空态。桌面程序不该有一块区域
-						    时有时无，位置稳定才能形成肌肉记忆。 */}
-						<section className="trading-panel">
-							<header><RefreshCw size={17} /><h2>挂单</h2><span className="trading-subtle">限价未触及前保持挂起</span></header>
-							{pendingOrders.length === 0 ? (
-								<p className="trading-empty">当前没有等待成交的挂单。计划确认后未触及限价的委托会出现在这里。</p>
-							) : (
-								<div className="trading-pending">
-									{pendingOrders.map((order) => (
-										<PendingOrder key={order.id} order={order} onCancel={async () => {
-											if (!config) return;
-											try {
-												await cancelTradeOrder(config, order.id);
-												setMessage('订单已撤销');
-												await loadPlans();
-											} catch (cause) {
-												setError(cause instanceof Error ? cause.message : '撤销失败');
-											}
-										}} />
-									))}
-								</div>
-							)}
-						</section>
-					</div>
-				)}
 
 				{activeView === 'autopilot' && (
 					<div className="trading-view trading-view-autopilot">
@@ -2023,6 +2074,51 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 				)}
 			</div>
 		</section>
+	);
+}
+
+// EquityCurve 把逐日累计已实现盈亏画成一条曲线：比一排柱子更快回答
+// 「这笔钱是稳定赚上来的，还是一把押对的」。零轴虚线在曲线之上，说明还在亏损区。
+// 口径与 PerformancePanel 一致：只统计已平仓的落袋盈亏，不含持仓浮盈。
+function EquityCurve({ daily }: { daily: TradeDailyPnL[] }) {
+	const width = 680;
+	const height = 150;
+	const padX = 2;
+	const padY = 12;
+	const values = daily.map((item) => item.cumulative);
+	const min = Math.min(0, ...values);
+	const max = Math.max(0.0001, ...values);
+	const span = max - min || 1;
+	const x = (index: number) => padX + (index / Math.max(daily.length - 1, 1)) * (width - padX * 2);
+	const y = (value: number) => padY + (1 - (value - min) / span) * (height - padY * 2);
+	// 只有平仓首日一个样本时没有连线可言：画一段水平线表示「该日累计就是这个值」。
+	const line = daily.length === 1
+		? `M${padX},${y(values[0]).toFixed(1)} L${(width - padX).toFixed(1)},${y(values[0]).toFixed(1)}`
+		: values
+			.map((value, index) => `${index === 0 ? 'M' : 'L'}${x(index).toFixed(1)},${y(value).toFixed(1)}`)
+			.join(' ');
+	const zeroY = y(0);
+	// 面积沿零轴收口：单点时线段终点是 width-padX，不是 x(0)，否则会画出斜三角。
+	const lastX = daily.length === 1 ? width - padX : x(values.length - 1);
+	const area = `${line} L${lastX.toFixed(1)},${zeroY.toFixed(1)} L${x(0).toFixed(1)},${zeroY.toFixed(1)} Z`;
+	const last = values[values.length - 1];
+	return (
+		<div className="trading-perf-chart">
+			<svg
+				viewBox={`0 0 ${width} ${height}`}
+				preserveAspectRatio="none"
+				role="img"
+				aria-label={`累计已实现盈亏曲线，最新 ${signedMoney(last)} 元`}
+			>
+				<path className={`area ${last >= 0 ? 'up' : 'down'}`} d={area} />
+				<line className="zero" x1={padX} x2={width - padX} y1={zeroY} y2={zeroY} />
+				<path className={`line ${last >= 0 ? 'up' : 'down'}`} d={line} vectorEffect="non-scaling-stroke" />
+			</svg>
+			<div className="trading-perf-chart-axis">
+				<span>{daily[0].day.slice(5)}</span>
+				<span>{daily[daily.length - 1].day.slice(5)}</span>
+			</div>
+		</div>
 	);
 }
 
@@ -2115,13 +2211,20 @@ function PerformancePanel({
 						<span>模型离场 {perf.model_exits}</span>
 					</div>
 
-					{daily.length > 0 && (
-						<div className="trading-perf-curve">
-							<div className="trading-perf-curve-head">
-								<strong>逐日已实现</strong>
-								<span>累计 {signed(perf.realized_pnl)}</span>
-							</div>
-							<div className="trading-perf-bars">
+				{daily.length > 0 && (
+					<div className="trading-perf-curve">
+						<div className="trading-perf-curve-head">
+							<strong>累计已实现收益曲线</strong>
+							<span>
+								{daily[0].day} ~ {daily[daily.length - 1].day} · 累计 {signed(perf.realized_pnl)}
+							</span>
+						</div>
+						<EquityCurve daily={daily} />
+						<div className="trading-perf-curve-head sub">
+							<strong>逐日已实现</strong>
+							<span>柱高为当日平仓盈亏，悬浮看明细</span>
+						</div>
+						<div className="trading-perf-bars">
 								{daily.map((item) => {
 									const height = Math.max(2, Math.round((Math.abs(item.pnl) / maxAbs) * 56));
 									return (

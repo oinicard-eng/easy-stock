@@ -1,15 +1,15 @@
 // AI 交易员的导航信息架构：左侧分组导航 + 右侧视图区，与行情总览同一套布局语言。
 //
 // 分组依据是「使用者一天的操作流」，不是功能的技术归属：
-// 开盘先看状态（钱和系统在不在工作）→ 交易（选股、确认、持仓）→
+// 开盘先看状态（钱、持仓和系统在不在工作）→ 交易（选股、确认）→
 // 自动运行交给系统盯 → 收盘后复盘 → 出问题时去运维。
-// 每组内的页面数量刻意少：一个视图就是一件事，相关内容在页内分区，不摊成多个入口。
+// 持仓与挂单是「我的钱现在是什么样」的一部分，归账户总览而不单开一页——
+// 任何交易软件的首页都是资金 + 持仓 + 委托，没有人把它们拆成三个入口。
 
 export type TradingView =
 	| 'overview'
 	| 'market'
 	| 'planning'
-	| 'positions'
 	| 'autopilot'
 	| 'performance'
 	| 'review'
@@ -32,7 +32,7 @@ export const tradingNavGroups: TradingNavGroup[] = [
 		id: 'status',
 		name: '今日状态',
 		modules: [
-			{ id: 'overview', name: '账户总览', description: '资产、盈亏与待办' },
+			{ id: 'overview', name: '账户总览', description: '资产、持仓、挂单与待办' },
 			{ id: 'market', name: '市场环境', description: '市场判定与仓位上限' },
 		],
 	},
@@ -41,7 +41,6 @@ export const tradingNavGroups: TradingNavGroup[] = [
 		name: '交易执行',
 		modules: [
 			{ id: 'planning', name: '选股与计划', description: '生成、确认与历史计划' },
-			{ id: 'positions', name: '持仓与挂单', description: '防守线与在途委托' },
 		],
 	},
 	{
@@ -70,8 +69,10 @@ export const tradingNavGroups: TradingNavGroup[] = [
 
 export const defaultTradingView: TradingView = 'overview';
 
-// 旧版视图 ID 的兼容映射：历史计划并入选股与计划、时间线并入自动运行、记忆并入复盘。
+// 旧版视图 ID 的兼容映射：持仓并入账户总览、历史计划并入选股与计划、
+// 时间线并入自动运行、记忆并入复盘。
 const legacyViewAlias: Record<string, TradingView> = {
+	positions: 'overview',
 	plans: 'planning',
 	timeline: 'autopilot',
 	memory: 'review',

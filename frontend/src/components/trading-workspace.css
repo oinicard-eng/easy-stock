@@ -1370,6 +1370,11 @@ button.trading-status-tile:hover {
 	border-right: 0;
 }
 
+/* KPI 扩到 8 格（两行四列）：首行补一条行分隔线。 */
+.trading-market-grid > div:nth-child(-n + 4) {
+	border-bottom: 1px solid var(--line-soft);
+}
+
 .trading-market-grid span {
 	color: var(--theme-muted);
 	font-size: var(--fs-caption);
@@ -2737,6 +2742,63 @@ button.trading-status-tile:hover {
 	font-size: var(--fs-caption);
 }
 
+.trading-perf-curve-head.sub {
+	margin-top: 14px;
+}
+
+/* 累计收益曲线：颜色口径与逐日柱一致——正收益红、负收益绿（A 股习惯）。 */
+.trading-perf-chart {
+	min-width: 0;
+}
+
+.trading-perf-chart > svg {
+	display: block;
+	width: 100%;
+	height: 150px;
+}
+
+.trading-perf-chart .area {
+	opacity: 0.09;
+}
+
+.trading-perf-chart .area.up {
+	fill: var(--up);
+}
+
+.trading-perf-chart .area.down {
+	fill: var(--down);
+}
+
+.trading-perf-chart .line {
+	fill: none;
+	stroke-width: 2;
+}
+
+.trading-perf-chart .line.up {
+	stroke: var(--up);
+}
+
+.trading-perf-chart .line.down {
+	stroke: var(--down);
+}
+
+.trading-perf-chart .zero {
+	stroke: var(--theme-muted);
+	stroke-width: 1;
+	stroke-dasharray: 4 4;
+	opacity: 0.5;
+	vector-effect: non-scaling-stroke;
+}
+
+.trading-perf-chart-axis {
+	display: flex;
+	justify-content: space-between;
+	margin-top: 4px;
+	color: var(--theme-muted);
+	font-family: var(--font-num);
+	font-size: var(--fs-micro);
+}
+
 .trading-perf-bars {
 	display: flex;
 	align-items: flex-end;
@@ -3185,9 +3247,10 @@ button.trading-status-tile:hover {
 	min-width: 0;
 }
 
-/* 总览：状态条与资产行固定高，剩余高度全部交给两栏仪表盘。 */
+/* 总览：五个区块全部自然高度。持仓并入后页面本身已足够长，
+   不再用 1fr 把中段拉高——那只会制造大片空白的敷衍感。 */
 .trading-view-overview {
-	grid-template-rows: auto auto minmax(0, 1fr);
+	grid-template-rows: none;
 }
 
 .trading-view-overview > .trading-overview-grid {
@@ -3267,6 +3330,82 @@ button.trading-status-tile:hover {
 	overflow: hidden;
 }
 
+/* 仓位预算对照条：把市场判定翻译成「我还能买多少」。 */
+.trading-budget-strip {
+	display: grid;
+	grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+	gap: 20px;
+	align-items: center;
+	padding: 12px 16px;
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--theme-blue);
+	border-radius: 12px;
+	background: var(--theme-surface, var(--surface));
+	box-shadow: 0 8px 24px var(--theme-shadow, rgba(30, 52, 78, 0.06));
+}
+
+.trading-budget-copy {
+	display: flex;
+	align-items: baseline;
+	gap: 14px;
+	flex-wrap: wrap;
+	white-space: nowrap;
+}
+
+.trading-budget-copy > span {
+	color: var(--theme-muted);
+	font-size: var(--fs-caption);
+	font-weight: 600;
+}
+
+.trading-budget-copy > strong {
+	font-family: var(--font-num);
+	font-size: var(--fs-title);
+	line-height: var(--lh-metric);
+}
+
+.trading-budget-copy > em {
+	color: var(--theme-muted);
+	font-size: var(--fs-caption);
+	font-style: normal;
+}
+
+.trading-budget-copy > em.warn {
+	color: var(--theme-amber);
+	font-weight: 600;
+}
+
+.trading-budget-bar {
+	position: relative;
+	height: 10px;
+	border-radius: 999px;
+	background: var(--line-soft);
+}
+
+.trading-budget-bar > .current {
+	display: block;
+	height: 100%;
+	border-radius: 999px;
+	background: var(--theme-blue);
+	opacity: 0.75;
+	transition: width 0.25s ease;
+}
+
+.trading-budget-bar > .current.over {
+	background: var(--theme-amber-solid, var(--theme-amber));
+	opacity: 0.9;
+}
+
+.trading-budget-bar > .mark {
+	position: absolute;
+	top: -4px;
+	bottom: -4px;
+	width: 2px;
+	border-radius: 1px;
+	background: var(--theme-text, var(--text));
+	opacity: 0.5;
+}
+
 .trading-market-detail {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -3303,7 +3442,7 @@ button.trading-status-tile:hover {
 
 .trading-industry-table > div {
 	display: grid;
-	grid-template-columns: 92px minmax(0, 1fr) 62px 46px;
+	grid-template-columns: 92px minmax(0, 1fr) 62px 46px 84px;
 	align-items: center;
 	gap: 10px;
 	padding: 5px 8px;
@@ -3349,6 +3488,12 @@ button.trading-status-tile:hover {
 	font-size: var(--fs-caption);
 	font-style: normal;
 	text-align: right;
+}
+
+.trading-industry-table em.leader {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 /* 选股页右栏：候选池 + 计划详情纵向串联。 */
@@ -3451,8 +3596,18 @@ button.trading-status-tile:hover {
 		border-right: 0;
 	}
 
-	.trading-market-grid > div:nth-child(-n + 2) {
+	/* 8 格 KPI 折成两列四行：只有最后两格不画底线。 */
+	.trading-market-grid > div:nth-child(-n + 6) {
 		border-bottom: 1px solid var(--line-soft);
+	}
+
+	.trading-budget-strip {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 10px;
+	}
+
+	.trading-budget-copy {
+		white-space: normal;
 	}
 
 	.trading-perf-groups {

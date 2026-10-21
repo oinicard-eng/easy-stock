@@ -7,7 +7,6 @@ describe('trading navigation', () => {
 		const names = tradingNavGroups.flatMap((group) => group.modules.map((module) => module.name));
 		expect(names).toContain('账户总览');
 		expect(names).toContain('选股与计划');
-		expect(names).toContain('持仓与挂单');
 		expect(names).toContain('健康与告警');
 		// 交易模块对用户的统一名称是「AI交易员」。
 		expect(JSON.stringify(tradingNavGroups)).not.toContain('交易智能体');
@@ -16,14 +15,13 @@ describe('trading navigation', () => {
 	it('covers every view exactly once with unique ids', () => {
 		const ids = tradingNavGroups.flatMap((group) => group.modules.map((module) => module.id));
 		expect(new Set(ids).size).toBe(ids.length);
-		// 8 个视图：plans 并入 planning、timeline 并入 autopilot、memory 并入 review。
-		expect(ids).toEqual(['overview', 'market', 'planning', 'positions', 'autopilot', 'performance', 'review', 'ops']);
+		// 7 个视图：持仓并入总览、plans 并入 planning、timeline 并入 autopilot、memory 并入 review。
+		expect(ids).toEqual(['overview', 'market', 'planning', 'autopilot', 'performance', 'review', 'ops']);
 	});
 
 	it('resolves supported trading hashes and falls back to overview', () => {
 		expect(resolveTradingView('#trading')).toBe('overview');
 		expect(resolveTradingView('#trading/')).toBe('overview');
-		expect(resolveTradingView('#trading/positions')).toBe('positions');
 		expect(resolveTradingView('#trading/planning')).toBe('planning');
 		expect(resolveTradingView('#trading/autopilot')).toBe('autopilot');
 		expect(resolveTradingView('#trading/unknown')).toBe(defaultTradingView);
@@ -32,13 +30,14 @@ describe('trading navigation', () => {
 	});
 
 	it('maps legacy view ids to their merged homes', () => {
+		expect(resolveTradingView('#trading/positions')).toBe('overview');
 		expect(resolveTradingView('#trading/plans')).toBe('planning');
 		expect(resolveTradingView('#trading/timeline')).toBe('autopilot');
 		expect(resolveTradingView('#trading/memory')).toBe('review');
 	});
 
 	it('finds modules and group names', () => {
-		expect(findTradingModule('positions').name).toBe('持仓与挂单');
+		expect(findTradingModule('overview').name).toBe('账户总览');
 		expect(findTradingGroupName('ops')).toBe('运维保障');
 		expect(findTradingGroupName('overview')).toBe('今日状态');
 	});
