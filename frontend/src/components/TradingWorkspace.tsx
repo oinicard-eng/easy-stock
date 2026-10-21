@@ -1377,27 +1377,36 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 						    它们回答「系统现在在不在工作」，比盈亏更该被先看到。 */}
 						<div className="trading-status-strip">
 							<button type="button" className={`trading-status-tile ${autopilot?.running ? 'ok' : 'idle'}`} onClick={() => selectTradingView('autopilot')}>
-								<span>自动运行</span>
-								<strong>{autopilot ? (autopilot.running ? '运行中' : '已停止') : '—'}</strong>
-								<em>
-									{autopilot
-										? autopilot.running
-											? autopilot.next_run_at
-												? `下一轮 ${clockText(autopilot.next_run_at)}`
-												: `今日已跑 ${autopilot.cycles_today} 轮`
-											: '点此开启自动运行'
-										: '等待读取'}
-								</em>
+								<i><CalendarClock size={17} /></i>
+								<span className="trading-tile-body">
+									<span>自动运行</span>
+									<strong>{autopilot ? (autopilot.running ? '运行中' : '已停止') : '—'}</strong>
+									<em>
+										{autopilot
+											? autopilot.running
+												? autopilot.next_run_at
+													? `下一轮 ${clockText(autopilot.next_run_at)}`
+													: `今日已跑 ${autopilot.cycles_today} 轮`
+												: '点此开启自动运行'
+											: '等待读取'}
+									</em>
+								</span>
 							</button>
 							<button type="button" className={`trading-status-tile ${board?.market?.evaluated ? 'ok' : 'idle'}`} onClick={() => selectTradingView('market')}>
-								<span>市场环境</span>
-								<strong>{board?.market?.evaluated ? board.market.label : '未评估'}</strong>
-								<em>{board?.market?.evaluated ? `允许仓位上限 ${board.market.risk_budget_percent}%` : '点此刷新市场判定'}</em>
+								<i><Activity size={17} /></i>
+								<span className="trading-tile-body">
+									<span>市场环境</span>
+									<strong>{board?.market?.evaluated ? board.market.label : '未评估'}</strong>
+									<em>{board?.market?.evaluated ? `允许仓位上限 ${board.market.risk_budget_percent}%` : '点此刷新市场判定'}</em>
+								</span>
 							</button>
 							<button type="button" className={`trading-status-tile ${health ? (health.status === 'healthy' ? 'ok' : health.status === 'warning' ? 'warn' : 'bad') : 'idle'}`} onClick={() => selectTradingView('ops')}>
-								<span>健康检查</span>
-								<strong>{health ? healthLabel(health.status) : '—'}</strong>
-								<em>{health ? `${health.positions} 只持仓 · ${health.open_orders} 笔挂单` : '等待读取'}</em>
+								<i><ShieldCheck size={17} /></i>
+								<span className="trading-tile-body">
+									<span>健康检查</span>
+									<strong>{health ? healthLabel(health.status) : '—'}</strong>
+									<em>{health ? `${health.positions} 只持仓 · ${health.open_orders} 笔挂单` : '等待读取'}</em>
+								</span>
 							</button>
 							{/* 门控格不是跳转入口而是操作入口：状态和总闸放在同一格，
 							    避免页面上出现两处写着「正常运行」的地方。 */}
@@ -1409,62 +1418,77 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 										? '只停新增买入，卖出与减仓照常执行。'
 										: '门控放行。全自动执行上线后，这里是唯一的人工总闸。'}
 							>
-								<span>交易门控</span>
-								<strong>{controlGateText(account?.control)}</strong>
-								<div className="trading-gate-actions">
-									<button
-										type="button"
-										className="trading-ghost"
-										onClick={() => void handleControl({ pause_buying: !account?.control.pause_buying })}
-										disabled={controlBusy || !account || account.control.kill_switch}
-									>
-										{account?.control.pause_buying && !account?.control.kill_switch ? '恢复买入' : '暂停买入'}
-									</button>
-									<button
-										type="button"
-										className={`trading-ghost ${account?.control.kill_switch ? 'danger active' : 'danger'}`}
-										onClick={() => void handleControl({ kill_switch: !account?.control.kill_switch })}
-										disabled={controlBusy || !account}
-									>
-										{account?.control.kill_switch ? '解除停止' : '全部停止'}
-									</button>
-									<button type="button" className="trading-link" onClick={() => void handleReconcile()} disabled={reconciling || !account}>
-										{reconciling ? '对账中…' : '对账'}
-									</button>
-								</div>
+								<i><PowerCircle size={17} /></i>
+								<span className="trading-tile-body">
+									<span>交易门控</span>
+									<strong>{controlGateText(account?.control)}</strong>
+									<div className="trading-gate-actions">
+										<button
+											type="button"
+											className="trading-ghost"
+											onClick={() => void handleControl({ pause_buying: !account?.control.pause_buying })}
+											disabled={controlBusy || !account || account.control.kill_switch}
+										>
+											{account?.control.pause_buying && !account?.control.kill_switch ? '恢复买入' : '暂停买入'}
+										</button>
+										<button
+											type="button"
+											className={`trading-ghost ${account?.control.kill_switch ? 'danger active' : 'danger'}`}
+											onClick={() => void handleControl({ kill_switch: !account?.control.kill_switch })}
+											disabled={controlBusy || !account}
+										>
+											{account?.control.kill_switch ? '解除停止' : '全部停止'}
+										</button>
+										<button type="button" className="trading-link" onClick={() => void handleReconcile()} disabled={reconciling || !account}>
+											{reconciling ? '对账中…' : '对账'}
+										</button>
+									</div>
+								</span>
 							</div>
 						</div>
 
 						<div className="trading-summary">
 							<article>
-								<header><Wallet size={15} /><span>总资产</span></header>
-								<strong>{account ? `¥ ${formatMoney(account.account.equity)}` : '—'}</strong>
-								<em className={returnPercent >= 0 ? 'up' : 'down'}>
-									{account ? `${returnPercent >= 0 ? '+' : ''}${returnPercent.toFixed(2)}%` : '—'}
-								</em>
+								<i><Wallet size={16} /></i>
+								<div>
+									<span>总资产</span>
+									<strong>{account ? `¥ ${formatMoney(account.account.equity)}` : '—'}</strong>
+									<em className={returnPercent >= 0 ? 'up' : 'down'}>
+										{account ? `${returnPercent >= 0 ? '+' : ''}${returnPercent.toFixed(2)}%` : '—'}
+									</em>
+								</div>
 							</article>
 							<article>
-								<header><Banknote size={15} /><span>可用资金</span></header>
-								<strong>{account ? `¥ ${formatMoney(availableCash(account.account))}` : '—'}</strong>
-								<em>
-									{account && account.account.reserved_cash > 0
-										? `挂单冻结 ¥ ${formatMoney(account.account.reserved_cash)}`
-										: `初始 ${account ? `¥ ${formatMoney(account.account.initial_cash)}` : '—'}`}
-								</em>
+								<i><Banknote size={16} /></i>
+								<div>
+									<span>可用资金</span>
+									<strong>{account ? `¥ ${formatMoney(availableCash(account.account))}` : '—'}</strong>
+									<em>
+										{account && account.account.reserved_cash > 0
+											? `挂单冻结 ¥ ${formatMoney(account.account.reserved_cash)}`
+											: `初始 ${account ? `¥ ${formatMoney(account.account.initial_cash)}` : '—'}`}
+									</em>
+								</div>
 							</article>
 							<article>
-								<header><PieChart size={15} /><span>持仓市值</span></header>
-								<strong>{account ? `¥ ${formatMoney(account.account.market_value)}` : '—'}</strong>
-								<em>{account?.positions?.length ?? 0} 只标的</em>
+								<i><PieChart size={16} /></i>
+								<div>
+									<span>持仓市值</span>
+									<strong>{account ? `¥ ${formatMoney(account.account.market_value)}` : '—'}</strong>
+									<em>{account?.positions?.length ?? 0} 只标的</em>
+								</div>
 							</article>
 							<article>
-								<header><TrendingUp size={15} /><span>浮动盈亏</span></header>
-								<strong className={unrealized >= 0 ? 'up' : 'down'}>{`${unrealized >= 0 ? '+' : ''}${formatMoney(unrealized)}`}</strong>
-								<em>
-									{account?.account.pnl
-										? `已实现 ${account.account.pnl.realized >= 0 ? '+' : ''}${formatMoney(account.account.pnl.realized)}`
-										: `账户：${account?.broker === 'paper' ? '模拟撮合' : account?.broker || '—'}`}
-								</em>
+								<i><TrendingUp size={16} /></i>
+								<div>
+									<span>浮动盈亏</span>
+									<strong className={unrealized >= 0 ? 'up' : 'down'}>{`${unrealized >= 0 ? '+' : ''}${formatMoney(unrealized)}`}</strong>
+									<em>
+										{account?.account.pnl
+											? `已实现 ${account.account.pnl.realized >= 0 ? '+' : ''}${formatMoney(account.account.pnl.realized)}`
+											: `账户：${account?.broker === 'paper' ? '模拟撮合' : account?.broker || '—'}`}
+									</em>
+								</div>
 							</article>
 						</div>
 
