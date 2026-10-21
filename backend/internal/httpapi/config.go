@@ -217,7 +217,7 @@ type Config struct {
 	ReviewHTTP               *http.Client
 	ReviewStore              *review.Store
 	PortfolioStore           *portfolioinspection.Store
-	// TradingDBPath 与 TradingStore 对应模拟盘账本；交易智能体只写本地账本，不触达券商。
+	// TradingDBPath 与 TradingStore 对应模拟盘账本；AI交易员只写本地账本，不触达券商。
 	TradingDBPath string
 	TradingStore  *trading.Store
 	// TradingAlert 是告警外发配置。零值表示不配任何出口：

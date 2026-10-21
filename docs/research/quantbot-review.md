@@ -2,7 +2,7 @@
 
 评估对象：`D:\quantbot-main\quantbot-1.8\quantbot-main`
 评估时间：2026-10-20
-评估目的：判断能否用于 easy-stock 交易智能体（AI 交易员）
+评估目的：判断能否用于 easy-stock AI交易员
 
 ## 一、结论
 

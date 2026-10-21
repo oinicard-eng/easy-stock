@@ -6,7 +6,7 @@
 |---|---|---|---|
 | **A** | `AI-Trading-System-v9.0.6-INIT` | Python，Flask 看板 | 114 个 py / 22,438 行；核心交易 34 文件 / 10,805 行 |
 | **B** | `quantbot-main` | Go + Wails 桌面 + React | 296 个 go / 123,647 行（`internal` 约 100,205）；前端 26 tsx / 15,495 行 |
-| **我方** | `easy-stock` 交易智能体 | Go 服务 + React 前端 | trading 包 49 文件 / 18,533 行；前端 trading 4,115 行 |
+| **我方** | `easy-stock` AI交易员 | Go 服务 + React 前端 | trading 包 49 文件 / 18,533 行；前端 trading 4,115 行 |
 
 对比方法：**只认代码事实，不认 README 宣称**。每条结论都落到 `文件:行号`。
 统计口径：核心能力以「下单路径上是否真的被执行」为准，不以「函数是否存在」为准。

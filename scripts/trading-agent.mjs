@@ -1,4 +1,4 @@
-// 交易智能体无人值守守护进程。
+// AI交易员无人值守守护进程。
 //
 // 用法：
 //   node scripts/trading-agent.mjs                # 前台守护（Ctrl+C 停止）

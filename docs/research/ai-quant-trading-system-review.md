@@ -2,7 +2,7 @@
 
 评估对象：<https://github.com/51ijjkbghvhj/ai-quant-trading-system>
 评估时间：2026-10-20
-评估目的：判断能否用于 easy-stock 交易智能体（`backend/internal/trading`）
+评估目的：判断能否用于 easy-stock AI交易员（`backend/internal/trading`）
 
 ## 一、结论
 
