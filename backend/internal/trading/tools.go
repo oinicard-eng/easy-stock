@@ -126,10 +126,10 @@ func (t *Toolbox) Specs() []ToolSpec {
 		},
 		{
 			Name:        "get_kline",
-			Description: "个股日线与技术位置：MA5/10/20/60、ATR14 及其占现价比例、20 日区间分位、近 5 日与 20 日均量比、连续上涨/下跌天数。用于判断趋势位置与波动大小。",
+			Description: "个股日线与技术位置：MA5/10/20/60、ATR14 及其占现价比例、20 日区间分位、近 5 日与 20 日均量比、连续上涨/下跌天数。用于判断趋势位置与波动大小。days 传 250 可看一年分位、传 750 可看三年分位，适合回答『这个价位在历史上算高还是低』。",
 			Params: []ToolParam{
 				{Name: "symbol", Type: "string", Required: true, Desc: "6 位代码，如 600519"},
-				{Name: "days", Type: "int", Desc: "回看交易日数，默认 60，最多 120"},
+				{Name: "days", Type: "int", Desc: "回看交易日数，默认 60，最多 750"},
 			},
 		},
 		{
@@ -353,7 +353,11 @@ func (t *Toolbox) getKline(ctx context.Context, args map[string]any) (ToolOutcom
 	if symbol == "" {
 		return ToolOutcome{}, fmt.Errorf("symbol 不能为空，且必须是 6 位代码")
 	}
-	days := intArg(args, "days", 60, 20, 120)
+	// 上限 750（约三年）。原先卡在 120 是因为新浪源只能给这么多，
+	// 而 120 根算不出超过一年的分位——"现在是不是三年高位"这类问题
+	// 以前问不了。QuantMind 能给 4000 根，东财次之，新浪仍只给约 120；
+	// 实际拿到多少由返回文本里的"日线 N 根"如实体现，不做补造。
+	days := intArg(args, "days", 60, 20, 750)
 
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()

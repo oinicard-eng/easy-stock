@@ -14,6 +14,7 @@ import (
 	"easy-stock/backend/internal/agent"
 	"easy-stock/backend/internal/httpapi"
 	"easy-stock/backend/internal/methodology"
+	"easy-stock/backend/internal/providers/quantmind"
 	"easy-stock/backend/internal/runtimelog"
 	"easy-stock/backend/internal/trading"
 )
@@ -113,8 +114,26 @@ func main() {
 		CacheDir:   masteryCacheDir,
 		HermesHome: hermesHome,
 	})
+	var quantMindKLine httpapi.KLineProvider
+	if baseURL := strings.TrimSpace(os.Getenv("A_STOCK_QUANTMIND_URL")); baseURL != "" {
+		// 只读接入：客户端只发 GET，不碰 QuantMind 的任何写接口。
+		// 凭据不全时保持 nil，日线链路退回东财→新浪，与接入前完全一致。
+		client, err := quantmind.NewClient(
+			os.Getenv("A_STOCK_QUANTMIND_TENANT"),
+			os.Getenv("A_STOCK_QUANTMIND_USER"),
+			os.Getenv("A_STOCK_QUANTMIND_PASSWORD"),
+			quantmind.WithBaseURL(baseURL),
+		)
+		if err != nil {
+			log.Printf("level=warn event=quantmind_disabled url=%s error=%q note=凭据不完整，日线仍走东财→新浪", baseURL, err.Error())
+		} else {
+			quantMindKLine = client
+			log.Printf("event=quantmind_enabled url=%s note=日线主源=QuantMind(前复权,最长4000根)，东财次之，新浪兜底", baseURL)
+		}
+	}
 	server := httpapi.NewServer(httpapi.Config{
 		Token:                    os.Getenv("A_STOCK_TOKEN"),
+		QuantMind:                quantMindKLine,
 		ReviewDBPath:             reviewDBPath,
 		PortfolioDBPath:          portfolioDBPath,
 		StockResearchDBPath:      stockResearchDBPath,

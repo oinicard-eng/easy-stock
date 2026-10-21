@@ -36,6 +36,28 @@ const maxRotations = 3;
 const healthIntervalMS = 30_000;
 const maxRestartDelayMS = 5 * 60_000;
 
+// 外部数据源凭据从 .runtime/quantmind.env 读取（.runtime/ 已在 .gitignore 里）。
+// 放文件而不是命令行参数：密码出现在进程列表里等于公开。
+// 文件不存在时返回空对象，行为与未接入前完全一致。
+function loadEnvFile(filePath) {
+	try {
+		const text = fs.readFileSync(filePath, 'utf8');
+		const values = {};
+		for (const line of text.split(/\r?\n/)) {
+			const trimmed = line.trim();
+			if (!trimmed || trimmed.startsWith('#')) continue;
+			const separator = trimmed.indexOf('=');
+			if (separator <= 0) continue;
+			values[trimmed.slice(0, separator).trim()] = trimmed.slice(separator + 1).trim();
+		}
+		return values;
+	} catch {
+		return {};
+	}
+}
+
+const extraEnv = loadEnvFile(path.join(logDir, 'quantmind.env'));
+
 if (!noBuild) {
 	console.log('[agent] building backend...');
 	const build = spawnSync('go', ['build', '-o', binary, './cmd/server'], {
@@ -83,7 +105,7 @@ let restartDelay = 5_000;
 function startBackend() {
 	child = spawn(binary, [], {
 		cwd: repoRoot,
-		env: { ...process.env, A_STOCK_ADDR: addr },
+		env: { ...process.env, ...extraEnv, A_STOCK_ADDR: addr },
 		stdio: ['ignore', fs.openSync(logFile, 'a'), fs.openSync(logFile, 'a')],
 		windowsHide: true,
 	});

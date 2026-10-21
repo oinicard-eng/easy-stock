@@ -176,7 +176,14 @@ func NewServer(config any) *Server {
 		cfg.Realtime = sinaClient
 	}
 	if cfg.KLinePrimary == nil {
-		cfg.KLinePrimary = eastMoneyClient
+		// QuantMind 在链路最前：它能给 4000 根前复权日线，而东财给不了那么长、
+		// 新浪是不复权。它挂掉时自动落到东财，再落到新浪，决策不会因为
+		// 局域网抖动而失去日线。没有配置 QuantMind 时行为与接入前一致。
+		if cfg.QuantMind != nil {
+			cfg.KLinePrimary = newKLineChain(cfg.QuantMind, eastMoneyClient)
+		} else {
+			cfg.KLinePrimary = eastMoneyClient
+		}
 	}
 	if cfg.KLineFallback == nil {
 		cfg.KLineFallback = sinaClient

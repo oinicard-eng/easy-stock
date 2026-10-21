@@ -179,6 +179,10 @@ type Config struct {
 	Realtime                 RealtimeProvider
 	KLinePrimary             KLineProvider
 	KLineFallback            KLineProvider
+	// QuantMind 是局域网 QuantMind 平台的只读客户端（历史日线/基本面/资金流）。
+	// 非 nil 时会插到日线链路最前，东财退为第二层，新浪仍作最终备源。
+	// 它是可选能力：为 nil 时行为与接入前完全一致。
+	QuantMind KLineProvider
 	News                     NewsProvider
 	StockNews                StockNewsSearchProvider
 	SectorMap                SectorMapProvider
