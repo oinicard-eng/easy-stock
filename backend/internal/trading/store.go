@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -304,6 +305,56 @@ func (s *Store) GetAccount(ctx context.Context, id string) (Account, error) {
 	account.CreatedAt = parseTime(created)
 	account.UpdatedAt = parseTime(updatedText)
 	return account, nil
+}
+
+// SumFees 汇总该账户全部成交的手续费。
+//
+// 单独取这个数字，是为了让"总资产为什么少了"能被拆开解释：
+// 费用既不在已实现盈亏里（买入侧），也不在浮动盈亏里（已摊进成本），
+// 不单独列出来，用户只能看到两个对不上的数字。
+func (s *Store) SumFees(ctx context.Context, accountID string) (float64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT content_json FROM trading_fills WHERE account_id=?`, accountID)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	total := 0.0
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return 0, err
+		}
+		var fill Fill
+		if err := json.Unmarshal([]byte(payload), &fill); err != nil {
+			// 一条坏记录不该让整个对账失败：跳过它，差额会以残差的形式暴露出来，
+			// 比在这里静默吞掉要好。
+			continue
+		}
+		total += fill.Fee
+	}
+	return round2(total), rows.Err()
+}
+
+// SumRealized 汇总该账户全部已平仓盈亏（净额，已扣卖出费、成本已含买入费）。
+func (s *Store) SumRealized(ctx context.Context, accountID string) (float64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT content_json FROM trading_closed_trades WHERE account_id=?`, accountID)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	total := 0.0
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return 0, err
+		}
+		var trade ClosedTrade
+		if err := json.Unmarshal([]byte(payload), &trade); err != nil {
+			continue
+		}
+		total += trade.PnL
+	}
+	return round2(total), rows.Err()
 }
 
 func (s *Store) ResetAccount(ctx context.Context, id string, initialCash float64) (Account, error) {
@@ -757,7 +808,9 @@ func (s *Store) ApplyFill(ctx context.Context, order Order, quantity int, price,
 		if order.Source == OrderSourceProtective && strings.HasPrefix(order.Trigger, TriggerTakeProfit) {
 			newStop := order.StopLossPrice
 			if position.AverageCost > 0 && position.AverageCost > newStop {
-				newStop = position.AverageCost
+				// 向上取整到分：四舍五入可能把止损压在成本下面（成本 10.004 → 止损 10.00），
+				// 那样"止盈后这笔交易不再亏损"就只是一句话，价格回到成本下方仍会亏钱。
+				newStop = math.Ceil(position.AverageCost*100) / 100
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE trading_positions
 				SET reduce_count=reduce_count+1, stop_loss_price=?, updated_at=?
@@ -830,11 +883,16 @@ func (s *Store) applyBuy(ctx context.Context, tx *sql.Tx, order Order, position 
 	takeProfit := order.TakeProfitPrice
 	ruleJSON := marshalRule(order.InvalidationRule)
 	if !exists {
+		// 建仓成本必须含买入费用，与加仓路径保持同一口径。
+		// A 股佣金 5 元起步，一笔 3000 元的建仓光佣金就摊掉 0.17%：
+		// 费用留在成本外，浮盈会系统性高估，而现金早已实扣，账就永远对不平。
+		// last_price 仍记成交价——那是市价，不是成本。
+		entryCost := round4((notional + fee) / float64(quantity))
 		_, err = tx.ExecContext(ctx, `INSERT INTO trading_positions(account_id,symbol,name,quantity,available_quantity,average_cost,last_price,
 			reserved_quantity,stop_loss_price,take_profit_price,peak_price,reduce_count,sector,opened_at,last_buy_date,
 			thesis,invalidation,invalidation_rule,expected_days,auto_reduce_at,entry_regime,entry_confidence,review_count,updated_at)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			order.AccountID, order.Symbol, order.Name, quantity, 0, price, price,
+			order.AccountID, order.Symbol, order.Name, quantity, 0, entryCost, price,
 			0, round2(stop), round2(takeProfit), price, 0, order.Sector, nowText(now), today,
 			order.Thesis, order.Invalidation, ruleJSON, order.ExpectedDays, "",
 			order.EntryRegime, round4(order.Confidence), 0, nowText(now))

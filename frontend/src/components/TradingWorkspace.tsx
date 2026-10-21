@@ -51,6 +51,7 @@ import {
 	testTradingAlert,
 	fetchTradingUniverse,
 	formatMoney,
+	signedMoney,
 	listTradeCycles,
 	listTradePlans,
 	matchPendingOrders,
@@ -1304,9 +1305,32 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 				<article>
 					<span>浮动盈亏</span>
 					<strong className={unrealized >= 0 ? 'up' : 'down'}>{`${unrealized >= 0 ? '+' : ''}${formatMoney(unrealized)}`}</strong>
-					<em>账户：{account?.broker === 'paper' ? '模拟撮合' : account?.broker || '—'}</em>
+					<em>
+						{account?.account.pnl
+							? `已实现 ${account.account.pnl.realized >= 0 ? '+' : ''}${formatMoney(account.account.pnl.realized)}`
+							: `账户：${account?.broker === 'paper' ? '模拟撮合' : account?.broker || '—'}`}
+					</em>
 				</article>
 			</div>
+
+			{/* 两个数字口径不同，必须有一行把中间项摆出来。
+			    少了它，"总资产 -630"和"浮动 +672"看上去就是矛盾的。 */}
+			{account?.account.pnl && (
+				<div className={`trading-pnl-check ${account.account.pnl.aligned ? 'ok' : 'warn'}`}>
+					<span>
+						总资产变动 {signedMoney(account.account.pnl.change)} = 已实现 {signedMoney(account.account.pnl.realized)}
+						{' + '}
+						浮动 {signedMoney(account.account.pnl.unrealized)}
+						{account.account.pnl.aligned ? '' : ` + 残差 ${signedMoney(account.account.pnl.residual)}`}
+					</span>
+					<em>累计费用 {formatMoney(account.account.pnl.fees)}（已含在上面两项里，不再单独扣一次）</em>
+					<b>
+						{account.account.pnl.aligned
+							? '对账通过'
+							: `差额 ${signedMoney(account.account.pnl.residual)}（此类差额来自早期建仓成本未计买入费，该口径已修复）`}
+					</b>
+				</div>
+			)}
 
 			{(error || message) && (
 				<div className={`trading-notice ${error ? 'error' : 'ok'}`}>

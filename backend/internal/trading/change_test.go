@@ -113,8 +113,9 @@ func TestPlanSkipsModelWhenNothingChanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("首轮生成失败：%v", err)
 	}
-	if first.Status != PlanStatusFailed {
-		t.Fatalf("首轮应为失败（无可执行建议），实际 %s", first.Status)
+	// 模型没提建议是"看过全盘后的结论"，不是故障：状态是 empty，不是 failed。
+	if first.Status != PlanStatusEmpty {
+		t.Fatalf("首轮应为主动空仓（模型未提建议），实际 %s", first.Status)
 	}
 	second, err := service.RunPlanSync(ctx, request, "cyc-2")
 	if !errors.Is(err, ErrNoMaterialChange) {

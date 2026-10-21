@@ -392,6 +392,7 @@ func (s *Service) AccountView(ctx context.Context, accountID string) (Account, [
 	}
 	account.MarketValue = round2(account.MarketValue)
 	account.Equity = round2(account.Cash + account.MarketValue)
+	account.PnL = s.pnlSplit(ctx, accountID, account, positions)
 	return account, positions, nil
 }
 
@@ -770,8 +771,15 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	switch actionable {
 	case 0:
 		plan.Orders = orders
-		plan.Status = PlanStatusFailed
-		plan.ErrorMessage = zeroOrderReason(decision)
+		if decision.Stats.Proposed == 0 {
+			// 模型一笔建议都没提，是它看过全盘后的结论（满仓、只数已满、当日禁买、
+			// 仓位超上限……）。这不是失败，把 ErrorMessage 也留空——
+			// 填一句"模型未给出可执行建议"，界面上看起来就像出了错。
+			plan.Status = PlanStatusEmpty
+		} else {
+			plan.Status = PlanStatusFailed
+			plan.ErrorMessage = zeroOrderReason(decision)
+		}
 	default:
 		// 落库时会再次校验可用资金并冻结；资金不够的订单会被就地标记为 rejected，
 		// 因此必须用返回值覆盖计划里的订单，否则界面会显示"可执行"其实没进账本。

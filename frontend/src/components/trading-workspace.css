@@ -78,6 +78,31 @@
 .trading-summary .up { color: var(--up, #d64545); }
 .trading-summary .down { color: var(--down, #2f9e6f); }
 
+/* 对账行：把"总资产变动"拆成已实现 + 浮动 + 残差。
+   用户能自己加一遍，就不必怀疑账错了。 */
+.trading-pnl-check {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 6px 14px;
+	padding: 10px 14px;
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--line);
+	border-radius: 10px;
+	font-size: var(--fs-small);
+	font-variant-numeric: tabular-nums;
+	background: var(--theme-surface, #fff);
+}
+
+.trading-pnl-check span { color: var(--text, inherit); }
+.trading-pnl-check em { font-style: normal; color: var(--muted); }
+.trading-pnl-check b { margin-left: auto; font-weight: 600; }
+
+.trading-pnl-check.ok { border-left-color: var(--down, #2f9e6f); }
+.trading-pnl-check.ok b { color: var(--down, #2f9e6f); }
+.trading-pnl-check.warn { border-left-color: #d68b00; }
+.trading-pnl-check.warn b { color: #b87400; }
+
 .trading-notice {
 	display: flex;
 	align-items: center;

@@ -2,7 +2,7 @@ import { requestJSON, type BackendConfig } from './backend';
 
 export type TradeSide = 'buy' | 'sell';
 export type TradeOrderType = 'limit' | 'market';
-export type TradePlanStatus = 'running' | 'draft' | 'executed' | 'rejected' | 'failed' | 'skipped';
+export type TradePlanStatus = 'running' | 'draft' | 'executed' | 'rejected' | 'failed' | 'skipped' | 'empty';
 export type TradeOrderStatus = 'pending' | 'filled' | 'partially_filled' | 'cancelled' | 'rejected' | 'expired';
 
 export type TradeAccount = {
@@ -17,6 +17,24 @@ export type TradeAccount = {
 	equity: number;
 	created_at: string;
 	updated_at: string;
+	/** 盈亏口径拆解：让"总资产少了多少"能被逐项验算。后端未提供时缺失。 */
+	pnl?: TradePnLSplit;
+};
+
+/**
+ * 盈亏拆解。恒等式：change = realized + unrealized + residual。
+ * realized 与 unrealized 都是净额（成本含买入费、已实现扣卖出费），
+ * 所以 fees 只是信息项，不能再减一次。
+ */
+export type TradePnLSplit = {
+	initial_cash: number;
+	equity: number;
+	change: number;
+	realized: number;
+	unrealized: number;
+	fees: number;
+	residual: number;
+	aligned: boolean;
 };
 
 /** 可用资金 = cash - reserved_cash，是唯一可动用的钱 */
@@ -772,6 +790,7 @@ export const tradePlanStatusText: Record<TradePlanStatus, string> = {
 	rejected: '已放弃',
 	failed: '未通过',
 	skipped: '无变化跳过',
+	empty: '主动空仓',
 };
 
 export const tradeOrderStatusText: Record<TradeOrderStatus, string> = {
@@ -785,6 +804,14 @@ export const tradeOrderStatusText: Record<TradeOrderStatus, string> = {
 
 export function formatMoney(value: number): string {
 	return value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/**
+ * 带正负号的金额。对账行里必须看得出加减方向——
+ * 只给数字的话，"1157.67"到底是加项还是减项全靠猜。
+ */
+export function signedMoney(value: number): string {
+	return `${value >= 0 ? '+' : '-'}${formatMoney(Math.abs(value))}`;
 }
 
 

@@ -518,6 +518,8 @@ func orderCountTitle(prefix string, count int, status PlanStatus) string {
 		label = "生成中"
 	case PlanStatusSkipped:
 		label = "无变化跳过"
+	case PlanStatusEmpty:
+		label = "主动空仓"
 	}
 	if count == 0 {
 		return prefix + "（" + label + "，无建议）"

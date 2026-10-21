@@ -203,8 +203,12 @@ func TestProtectiveTakeProfitIsTieredAndMovesStop(t *testing.T) {
 	if position.Quantity != 600 || position.ReduceCount != 1 {
 		t.Fatalf("应剩 600 股且记一次减仓，实际 %d 股、%d 次", position.Quantity, position.ReduceCount)
 	}
-	if position.StopLossPrice != position.AverageCost {
-		t.Fatalf("止盈后止损应上移到成本 %.2f，实际 %.2f", position.AverageCost, position.StopLossPrice)
+	// 止损上移到成本价，并按分向上取整——取整只能更保守，不能把止损压到成本下方。
+	if position.StopLossPrice < position.AverageCost {
+		t.Fatalf("止损 %.2f 不该低于成本 %.4f", position.StopLossPrice, position.AverageCost)
+	}
+	if position.StopLossPrice-position.AverageCost >= 0.01 {
+		t.Fatalf("止损 %.2f 应贴近成本 %.4f，不该高出一分以上", position.StopLossPrice, position.AverageCost)
 	}
 
 	trades, err := service.ClosedTrades(ctx, DefaultAccountID, 10)

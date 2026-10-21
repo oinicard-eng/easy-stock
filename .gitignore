@@ -36,6 +36,8 @@ desktop/dist/
 desktop/.cache/
 backend/tmp/
 backend/bin/
+# go build 在包目录直出的产物（守护脚本实际用的是 backend/bin 下那份）
+backend/server.exe
 backend/server
 # BigAMap raw responses archived by cmd/theme-library-import; the curated snapshot
 # lives in backend/internal/themelibrary/seed.json and is embedded into the binary.

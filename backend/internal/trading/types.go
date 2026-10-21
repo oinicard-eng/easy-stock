@@ -73,6 +73,11 @@ const (
 	// 它与 failed 必须分开：跳过是系统在省钱，失败是系统坏了，混在一起会让
 	// 失败率虚高，最后没人再看那个数字。
 	PlanStatusSkipped PlanStatus = "skipped"
+	// PlanStatusEmpty 表示模型看过全盘后主动选择不操作（一笔建议都没提）。
+	// 它必须与 failed 分开，理由和 skipped 一样：空仓是一条结论，不是故障。
+	// 混成 failed 之后，计划列表会连着排"未通过"，用户以为系统坏了，
+	// 实际是它正确地拒绝了交易——这种误判会让人去改一个不该改的地方。
+	PlanStatusEmpty PlanStatus = "empty"
 	// PlanStatusFailed 表示生成或校验失败。
 	PlanStatusFailed PlanStatus = "failed"
 )
@@ -104,6 +109,30 @@ type Account struct {
 	Equity       float64   `json:"equity"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// PnL 是账户盈亏的口径拆解，只在对外展示时填充，不落库。
+	// 存在的理由只有一个：让人能自己验算，而不是面对两个互相矛盾的汇总数字。
+	PnL *PnLSplit `json:"pnl,omitempty"`
+}
+
+// PnLSplit 把"总资产为什么变成现在这样"拆成可以直接相加的项。
+//
+//	Change = Realized + Unrealized + Residual
+//
+// Realized 与 Unrealized 都是净额：成本已含买入费，已实现已扣卖出费。
+// 因此 Fees 只是信息项（告诉用户摩擦成本有多大），不参与上面的等式——
+// 再减一次就等于把费用算两遍。
+//
+// Residual 是未解释的残差。口径统一时它应当约等于 0；
+// 不为 0 就说明账面还有没对齐的地方，要如实报出来，而不是抹平。
+type PnLSplit struct {
+	InitialCash float64 `json:"initial_cash"`
+	Equity      float64 `json:"equity"`
+	Change      float64 `json:"change"`
+	Realized    float64 `json:"realized"`
+	Unrealized  float64 `json:"unrealized"`
+	Fees        float64 `json:"fees"`
+	Residual    float64 `json:"residual"`
+	Aligned     bool    `json:"aligned"`
 }
 
 // AvailableCash 是本账本唯一的「还能花多少钱」口径。
