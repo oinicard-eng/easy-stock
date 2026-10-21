@@ -955,6 +955,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/cockpit/briefs", s.cockpitBriefs)
 	s.mux.HandleFunc("GET /api/v1/cockpit/briefs/{id}", s.cockpitBrief)
 	s.mux.HandleFunc("POST /api/v1/cockpit/briefs", s.cockpitRun)
+	s.mux.HandleFunc("POST /api/v1/cockpit/auto-patrol", s.cockpitAutoPatrol)
 	s.mux.HandleFunc("GET /api/v1/ws/stream", s.stream)
 }
 

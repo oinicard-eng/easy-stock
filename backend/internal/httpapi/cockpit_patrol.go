@@ -77,7 +77,9 @@ func (s *Server) newCockpitPatrolService(settingsPath string, logger *log.Logger
 		}
 		return nil
 	}
-	return cockpit.NewService(store, s.cockpitFeed(), cockpitNarrator{gateway: s.agentGateway, usage: s.usageGateway}, logger)
+	service := cockpit.NewService(store, s.cockpitFeed(), cockpitNarrator{gateway: s.agentGateway, usage: s.usageGateway}, logger)
+	// 自动巡查默认关闭，且不做持久化：软件每次启动都回到关闭，必须由用户手动打开。
+	return service
 }
 
 func (s *Server) cockpitFeed() cockpit.Feed {
@@ -395,6 +397,29 @@ func (s *Server) cockpitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"data": brief})
+}
+
+// cockpitAutoPatrol 切换自动巡查总开关。它只作用于当前进程内存：
+// 不写设置文件、重启后回到关闭，只有用户显式调用这个接口才会打开。
+func (s *Server) cockpitAutoPatrol(w http.ResponseWriter, r *http.Request) {
+	if s.cockpit == nil {
+		writeError(w, http.StatusServiceUnavailable, "巡查服务不可用")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	var request struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	if request.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "enabled 不能为空")
+		return
+	}
+	s.cockpit.SetAutoPatrol(*request.Enabled)
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]bool{"enabled": s.cockpit.AutoPatrol()}})
 }
 
 // RunCockpitPatrol 按 30 秒周期检查计划时点；巡查本身在后台执行，调度循环不会被阻塞。

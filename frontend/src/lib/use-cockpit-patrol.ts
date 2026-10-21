@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BackendConfig } from './backend';
-import { type PatrolBrief, type PatrolStatus, fetchPatrolBriefs, fetchPatrolStatus, runPatrol } from './cockpit-patrol';
+import { type PatrolBrief, type PatrolStatus, fetchPatrolBriefs, fetchPatrolStatus, runPatrol, setAutoPatrol } from './cockpit-patrol';
 
 const STATUS_INTERVAL_MS = 30_000;
 const RUNNING_INTERVAL_MS = 3_000;
@@ -71,5 +71,20 @@ export function useCockpitPatrol(config: BackendConfig | null, refreshKey: numbe
 		}
 	}, [config, load]);
 
-	return { status, briefs, error, loading, starting, running, start, reload: load } as const;
+	// 开关计划巡查：先乐观更新状态让滑块即时响应，失败时回滚并提示。
+	// 成功后重新拉一次状态，让「下次巡查」标签随开关即时出现或消失，不等 30 秒轮询。
+	const toggleAuto = useCallback(async (enabled: boolean) => {
+		setStatus((prev) => (prev ? { ...prev, auto_patrol: enabled } : prev));
+		if (!config) return;
+		try {
+			await setAutoPatrol(config, enabled);
+			await load();
+		} catch (reason) {
+			if (!mounted.current) return;
+			setStatus((prev) => (prev ? { ...prev, auto_patrol: !enabled } : prev));
+			setError(reason instanceof Error ? reason.message : '保存自动巡查开关失败');
+		}
+	}, [config, load]);
+
+	return { status, briefs, error, loading, starting, running, start, toggleAuto, reload: load } as const;
 }

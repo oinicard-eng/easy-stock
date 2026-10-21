@@ -649,6 +649,11 @@ function CockpitPatrolContent({ config, refreshKey }: Props) {
 	const nextRunLabel = patrol.status?.next_run_label || '';
 	const nextRun = nextRunLabel.includes(nextRunTime) ? nextRunLabel : [nextRunTime, nextRunLabel].filter(Boolean).join(' · ') || '--';
 	const runPhase: PatrolPhaseKey = followPhase;
+	// 自动巡查总开关：默认关闭，只有后端明确返回 true 才算开启。
+	// 状态未加载 / 旧后端没有该字段时一律按关闭显示，避免切页回来时开关自己亮起。
+	const autoOn = patrol.status?.auto_patrol === true;
+	// 关闭态由右侧「AI 已关闭」胶囊表达，副标题不再重复；开启时才显示下一次计划时间。
+	const patrolHint = !patrol.status ? ' · 读取中' : autoOn ? ` · 下次 ${nextRun}` : '';
 
 	if (!config) return null;
 
@@ -662,16 +667,38 @@ function CockpitPatrolContent({ config, refreshKey }: Props) {
 						<div>
 							<strong><Bot size={16} aria-hidden="true" />AI 自动巡查</strong>
 							<small>
-								会话 {sessionDate || '--'}{patrol.status && !patrol.status.trading_day ? ' · 休市' : ''} · 下次 {nextRun}
+								会话 {sessionDate || '--'}{patrol.status && !patrol.status.trading_day ? ' · 休市' : ''}
+								{patrolHint}
 							</small>
 						</div>
 					</div>
 					<div className="patrol-status-side">
+						{/* 状态胶囊跟随总开关：关闭即「AI 已关闭」，开启才显示连接状态，避免两处状态各说各话。 */}
 						{patrol.status && (
-							<span className={patrol.status.ai_available ? 'patrol-ai is-on' : 'patrol-ai'}>
-								{patrol.status.ai_available ? 'AI 已连接' : 'AI 未配置'}
+							<span
+								className={`patrol-ai${!autoOn ? ' is-off' : patrol.status.ai_available ? ' is-on' : ''}`}
+								title={!autoOn
+									? '自动巡查已关闭：不会按计划自动执行盘前/盘中/盘后巡查'
+									: patrol.status.ai_available
+										? '自动巡查已开启，AI 模型可调用'
+										: '自动巡查已开启，但未配置 AI 模型，只采集事实数据'}
+							>
+								{!autoOn ? 'AI 已关闭' : patrol.status.ai_available ? 'AI 已连接' : 'AI 未配置'}
 							</span>
 						)}
+					{/* 计划巡查总开关：只留滑块，盘前/盘中/盘后的定时巡查由此控制，手动巡查不受影响。 */}
+						<button
+							type="button"
+							role="switch"
+							aria-checked={autoOn}
+							aria-label="自动巡查"
+							className={`patrol-auto${autoOn ? ' is-on' : ''}`}
+							disabled={!patrol.status}
+							title={autoOn ? '自动巡查已开启，点击关闭盘前/盘中/盘后定时巡查' : '自动巡查已关闭，点击恢复定时巡查'}
+							onClick={() => void patrol.toggleAuto(!autoOn)}
+						>
+							<span className="patrol-auto-track" aria-hidden="true"><i className="patrol-auto-knob" /></span>
+						</button>
 						<button type="button" className="patrol-run" disabled={patrol.starting || patrol.running || !currentPhase} onClick={() => void patrol.start(runPhase)}>
 							{patrol.running ? <LoaderCircle className="spin" size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
 							{patrol.running ? '巡查进行中' : `立即${patrolPhaseLabel(runPhase)}巡查`}

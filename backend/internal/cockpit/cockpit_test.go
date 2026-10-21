@@ -224,6 +224,8 @@ func waitFor(t *testing.T, condition func() bool) {
 func TestTickRunsOncePerSlotWithFactsOnlyWhenAIUnavailable(t *testing.T) {
 	narrator := &fakeNarrator{available: false}
 	service, store := newTestService(t, narrator, at(20, 10, 15))
+	// 总开关默认关闭，本用例验证计划巡查本身，需显式打开。
+	service.SetAutoPatrol(true)
 	service.Tick()
 	waitFor(t, func() bool { return len(store.List("", 0)) == 1 && store.List("", 0)[0].Status == "ready" })
 	service.Tick()
@@ -243,9 +245,59 @@ func TestTickRunsOncePerSlotWithFactsOnlyWhenAIUnavailable(t *testing.T) {
 	}
 }
 
+func TestAutoPatrolDefaultsOffAndOnlyRunsWhenOpened(t *testing.T) {
+	narrator := &fakeNarrator{available: false}
+	service, store := newTestService(t, narrator, at(20, 10, 15))
+	// 总开关默认关闭：软件启动后到计划时点也不得自行巡查。
+	if service.Status().AutoPatrol {
+		t.Fatal("auto patrol must default to off")
+	}
+	service.Tick()
+	time.Sleep(50 * time.Millisecond)
+	if got := len(store.List("", 0)); got != 0 {
+		t.Fatalf("default-off service started a run, got %d briefs", got)
+	}
+	if status := service.Status(); status.NextRunAt != nil || status.NextRunName != "" {
+		t.Fatalf("next run should be hidden while closed: %+v", status)
+	}
+	// 手动巡查不受开关影响。
+	if _, err := service.RunManual(PhaseIntraday); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return len(store.List("", 0)) == 1 && store.List("", 0)[0].Status == "ready" })
+	// 用户显式打开后才恢复计划巡查，且状态在进程内保持不变（多次 Tick 不会自己改回）。
+	service.SetAutoPatrol(true)
+	if !service.Status().AutoPatrol {
+		t.Fatal("toggle should enable auto patrol")
+	}
+	service.now = func() time.Time { return at(20, 10, 45) }
+	service.Tick()
+	// 等最后一次巡查落盘完成，避免用例结束时后台 goroutine 仍在写临时目录。
+	waitFor(t, func() bool {
+		briefs := store.List("", 0)
+		return len(briefs) == 2 && briefs[0].Status == "ready"
+	})
+	service.Tick()
+	service.Tick()
+	if !service.Status().AutoPatrol {
+		t.Fatal("state must stay on until the user turns it off")
+	}
+}
+
+func TestAutoPatrolIsNotRestoredAcrossServiceRestart(t *testing.T) {
+	// 关掉再新建服务（等价于软件重启）：必须回到关闭，不读任何持久化状态。
+	first, _ := newTestService(t, &fakeNarrator{}, at(20, 10, 15))
+	first.SetAutoPatrol(true)
+	second, _ := newTestService(t, &fakeNarrator{}, at(20, 10, 15))
+	if second.Status().AutoPatrol {
+		t.Fatal("a fresh service must start with auto patrol closed")
+	}
+}
+
 func TestManualRunPassesPreviousIntradayForChangeDetection(t *testing.T) {
 	narrator := &fakeNarrator{available: true, text: "## 正在发生什么\n指数走弱（盘中情绪）"}
 	service, store := newTestService(t, narrator, at(20, 10, 15))
+	service.SetAutoPatrol(true)
 	service.Tick()
 	waitFor(t, func() bool { return store.List("", 0)[0].Status == "ready" })
 

@@ -122,6 +122,12 @@
 	color: var(--theme-green);
 }
 
+/* 总开关颜色语义：绿色=开启，黄色=关闭，胶囊与滑块轨道保持一致。 */
+.patrol-ai.is-off {
+	background: var(--theme-amber-soft);
+	color: var(--theme-amber);
+}
+
 /* 主动作按钮：与系统 .refresh-data-button 同规格（34 高 / 8px 圆角 / 12px）。 */
 .patrol-run {
 	display: inline-flex;
@@ -146,6 +152,54 @@
 .patrol-run:disabled {
 	opacity: 0.55;
 	cursor: not-allowed;
+}
+
+/* 计划巡查总开关：只保留滑块本身，不带外框与文字，放在「立即巡查」左侧。 */
+.patrol-auto {
+	display: inline-flex;
+	align-items: center;
+	padding: 4px;
+	border: 0;
+	background: none;
+	cursor: pointer;
+}
+
+.patrol-auto:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.patrol-auto-track {
+	position: relative;
+	display: inline-block;
+	width: 32px;
+	height: 18px;
+	border-radius: 999px;
+	/* 关闭态：黄色轨道与黄色滑块，和旁边「AI 已关闭」胶囊同一套配色。 */
+	background: var(--theme-amber-soft);
+	border: 1px solid var(--theme-amber-line);
+	transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+.patrol-auto-knob {
+	position: absolute;
+	top: 1px;
+	left: 1px;
+	width: 14px;
+	height: 14px;
+	border-radius: 999px;
+	background: var(--theme-amber);
+	transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.patrol-auto.is-on .patrol-auto-track {
+	background: var(--theme-green-soft);
+	border-color: var(--theme-green-line);
+}
+
+.patrol-auto.is-on .patrol-auto-knob {
+	transform: translateX(14px);
+	background: var(--theme-green);
 }
 
 .patrol-error,

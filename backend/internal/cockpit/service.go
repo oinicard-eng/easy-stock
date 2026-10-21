@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"easy-stock/backend/internal/foundation"
@@ -30,6 +31,7 @@ type Status struct {
 	NextRunName string     `json:"next_run_label,omitempty"`
 	Running     bool       `json:"running"`
 	AIAvailable bool       `json:"ai_available"`
+	AutoPatrol  bool       `json:"auto_patrol"`
 }
 
 type Service struct {
@@ -42,14 +44,32 @@ type Service struct {
 
 	mu   sync.Mutex
 	busy bool
+	// autoPatrol 是自动巡查的总开关，默认关闭：软件每次启动都必须由用户手动打开，
+	// 任何代码路径都不会自动置为 true（不做持久化、不做兜底恢复）。手动巡查不经过它。
+	autoPatrol atomic.Bool
 }
 
 func NewService(store *Store, feed Feed, narrator Narrator, logger *log.Logger) *Service {
 	return &Service{store: store, feed: feed, narrator: narrator, logger: logger, timeout: 6 * time.Minute, now: time.Now}
 }
 
+// SetAutoPatrol 打开或关闭计划巡查。只允许由用户操作触发（HTTP 切换接口），
+// 且只作用于当前进程：进程重启后回到关闭状态。
+func (s *Service) SetAutoPatrol(enabled bool) {
+	s.autoPatrol.Store(enabled)
+}
+
+// AutoPatrol 返回计划巡查当前是否开启。
+func (s *Service) AutoPatrol() bool {
+	return s.autoPatrol.Load()
+}
+
 // Tick 由调度器周期调用：到达计划时点且本会话尚未巡查时启动一次。
+// 自动巡查被关闭时直接返回，已有的巡查记录照常可查。
 func (s *Service) Tick() {
+	if !s.autoPatrol.Load() {
+		return
+	}
 	now := s.now()
 	slot, ok := DueSlot(now)
 	if !ok {
@@ -88,10 +108,13 @@ func (s *Service) Status() Status {
 	s.mu.Lock()
 	running := s.busy
 	s.mu.Unlock()
-	status := Status{Phase: state.Phase, SessionDate: state.SessionDate, TradingDay: state.TradingDay, Running: running, AIAvailable: s.narratorAvailable()}
-	if at, name := NextRun(now); !at.IsZero() {
-		status.NextRunAt = &at
-		status.NextRunName = name
+	status := Status{Phase: state.Phase, SessionDate: state.SessionDate, TradingDay: state.TradingDay, Running: running, AIAvailable: s.narratorAvailable(), AutoPatrol: s.autoPatrol.Load()}
+	// 关闭自动巡查后不再给出下一次计划时间，避免前端显示一个不会执行的时点。
+	if s.autoPatrol.Load() {
+		if at, name := NextRun(now); !at.IsZero() {
+			status.NextRunAt = &at
+			status.NextRunName = name
+		}
 	}
 	return status
 }

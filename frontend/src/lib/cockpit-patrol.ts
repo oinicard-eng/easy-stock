@@ -10,6 +10,8 @@ export type PatrolStatus = {
 	next_run_label?: string;
 	running: boolean;
 	ai_available: boolean;
+	// 计划巡查开关；老后端没有该字段时按开启处理。
+	auto_patrol?: boolean;
 };
 
 export type PatrolIndexQuote = { name: string; code: string; price: number; change_percent: number; trade_time?: string };
@@ -196,4 +198,13 @@ export async function runPatrol(config: BackendConfig, phase: Exclude<PatrolPhas
 		body: JSON.stringify({ phase }),
 	});
 	return payload.data;
+}
+
+// 切换盘前/盘中/盘后的计划巡查开关；手动「立即巡查」不受影响，设置持久化在后端。
+export async function setAutoPatrol(config: BackendConfig, enabled: boolean): Promise<void> {
+	await requestJSON<{ data: { enabled: boolean } }>(config, '/api/v1/cockpit/auto-patrol', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ enabled }),
+	});
 }
