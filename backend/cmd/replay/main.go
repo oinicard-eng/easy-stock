@@ -63,6 +63,7 @@ type options struct {
 	limit       int
 	warmup      int
 	cacheDir    string
+	refresh     bool
 	baseURL     string
 	tenant      string
 	user        string
@@ -77,6 +78,7 @@ func main() {
 	flag.IntVar(&opt.limit, "limit", 30, "候选池目标数量")
 	flag.IntVar(&opt.warmup, "warmup", 25, "首日之前需要的最少预热根数")
 	flag.StringVar(&opt.cacheDir, "cache", ".runtime/replay", "日线缓存目录")
+	flag.BoolVar(&opt.refresh, "refresh", false, "重新抓取标的名单（默认复用首次结果，保证多次回放是同一批股票）")
 	flag.StringVar(&opt.baseURL, "url", envOr("A_STOCK_QUANTMIND_URL", "http://192.168.5.6:8000"), "QuantMind 地址")
 	flag.StringVar(&opt.tenant, "tenant", envOr("A_STOCK_QUANTMIND_TENANT", ""), "QuantMind 租户")
 	flag.StringVar(&opt.user, "user", envOr("A_STOCK_QUANTMIND_USER", ""), "QuantMind 账号")
@@ -97,7 +99,7 @@ func run(opt options) error {
 	if err != nil {
 		return err
 	}
-	lists, err := loadSymbols(ctx, opt.symbols)
+	lists, err := loadSymbols(ctx, opt.symbols, opt.cacheDir, opt.refresh)
 	if err != nil {
 		return err
 	}
@@ -122,7 +124,23 @@ type symInfo struct {
 	Industry string
 }
 
-func loadSymbols(ctx context.Context, want int) ([]symInfo, error) {
+// loadSymbols 取标的名单，并缓存在本地。
+//
+// 必须缓存：名单来自东财的实时目录（分页五页），两次调用之间市场数据在变，
+// 分页结果也可能少几行。不冻结名单的话，两次"同样参数"的回放其实用的是
+// 两批不同的股票，任何 A/B 对比都会被这个差异污染——实测同一份代码两次
+// 运行的候选池 5 日收益相差 0.026 个百分点，原因就在这里。
+func loadSymbols(ctx context.Context, want int, cacheDir string, refresh bool) ([]symInfo, error) {
+	path := filepath.Join(cacheDir, fmt.Sprintf("symbols-%d.json", want))
+	if !refresh {
+		if raw, err := os.ReadFile(path); err == nil {
+			var cached []symInfo
+			if json.Unmarshal(raw, &cached) == nil && len(cached) > 0 {
+				fmt.Printf("复用标的名单 %d 只（%s）\n", len(cached), path)
+				return cached, nil
+			}
+		}
+	}
 	client := eastmoney.NewClient()
 	entries, err := client.StockCatalog(ctx)
 	if err != nil {
@@ -142,16 +160,20 @@ func loadSymbols(ctx context.Context, want int) ([]symInfo, error) {
 		filtered = append(filtered, symInfo{Symbol: symbol, Name: name, Industry: strings.TrimSpace(entry.Industry)})
 	}
 	sort.Slice(filtered, func(i, j int) bool { return filtered[i].Symbol < filtered[j].Symbol })
+	sampled := filtered
 	if want > 0 && len(filtered) > want {
 		// 等距抽样：按代码顺序取，避免"只挑大盘股"带来的隐性选择偏差。
 		step := float64(len(filtered)) / float64(want)
-		sampled := make([]symInfo, 0, want)
+		sampled = make([]symInfo, 0, want)
 		for index := 0; index < want; index++ {
 			sampled = append(sampled, filtered[int(float64(index)*step)])
 		}
-		return sampled, nil
 	}
-	return filtered, nil
+	if raw, err := json.Marshal(sampled); err == nil {
+		_ = os.MkdirAll(cacheDir, 0o755)
+		_ = os.WriteFile(path, raw, 0o644)
+	}
+	return sampled, nil
 }
 
 func fetchAll(ctx context.Context, client *quantmind.Client, lists []symInfo, cacheDir string, concurrency int) []series {
@@ -230,7 +252,30 @@ type variant struct {
 	topRets  float64
 	// positive 是收益为正的笔数，用于算胜率。
 	positive int
+	// buckets 按名次分段累计收益与笔数：1-5、6-10、11-15、16-20、21+。
+	// 它回答的是"排名到底有没有信息量"——如果各段收益没有单调关系，
+	// 那么打分只起了"筛掉一部分"的作用，模型按名次从上往下看就是错的。
+	bucketSum   [5]float64
+	bucketCount [5]int
 }
+
+// bucketOf 把名次映射到分段下标。
+func bucketOf(rank int) int {
+	switch {
+	case rank < 5:
+		return 0
+	case rank < 10:
+		return 1
+	case rank < 15:
+		return 2
+	case rank < 20:
+		return 3
+	default:
+		return 4
+	}
+}
+
+var bucketNames = [5]string{"1-5 名", "6-10 名", "11-15 名", "16-20 名", "21 名以后"}
 
 type report struct {
 	days       int
@@ -316,6 +361,9 @@ func collect(into *variant, board universe.Board, forward map[string]float64) {
 			into.topPicks++
 			into.topRets += ret
 		}
+		bucket := bucketOf(rank)
+		into.bucketSum[bucket] += ret
+		into.bucketCount[bucket]++
 	}
 }
 
@@ -490,6 +538,24 @@ func printReport(result report, opt options) {
 
 	base := meanOf(result.baseline)
 	after := meanOf(result.filtered)
+	fmt.Println()
+	fmt.Printf("%-12s", "名次分段")
+	for _, name := range bucketNames {
+		fmt.Printf("%12s", name)
+	}
+	fmt.Println()
+	for _, item := range []variant{result.baseline, result.filtered} {
+		fmt.Printf("%-12s", item.name)
+		for bucket := 0; bucket < 5; bucket++ {
+			if item.bucketCount[bucket] == 0 {
+				fmt.Printf("%12s", "-")
+				continue
+			}
+			fmt.Printf("%11.3f%%", item.bucketSum[bucket]/float64(item.bucketCount[bucket]))
+		}
+		fmt.Println()
+	}
+
 	fmt.Printf("\n结论：候选池平均 5 日收益 %+.3f%% → %+.3f%%（%+.3f 个百分点），前 5 名 %+.3f%% → %+.3f%%\n",
 		base, after, after-base, topMean(result.baseline), topMean(result.filtered))
 }
