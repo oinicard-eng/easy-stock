@@ -110,8 +110,8 @@
 	align-items: center;
 	gap: 8px;
 	width: 100%;
-	min-height: 46px;
-	padding: 6px 8px;
+	min-height: 30px;
+	padding: 5px 8px;
 	border: 0;
 	border-radius: 8px;
 	background: transparent;
@@ -137,12 +137,6 @@
 }
 
 .trading-nav-scroll button > span {
-	display: grid;
-	gap: 1px;
-	min-width: 0;
-}
-
-.trading-nav-scroll button strong {
 	overflow: hidden;
 	color: inherit;
 	font-size: var(--fs-body);
@@ -152,18 +146,8 @@
 	white-space: nowrap;
 }
 
-.trading-nav-scroll button small {
-	overflow: hidden;
-	color: var(--theme-muted);
-	font-size: var(--fs-caption);
-	line-height: var(--lh-snug);
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.trading-nav-scroll button.active small {
+.trading-nav-scroll button.active span {
 	color: var(--theme-blue);
-	opacity: 0.78;
 }
 
 .trading-nav-scroll button em {
@@ -3191,6 +3175,226 @@ button.trading-status-tile:hover {
 	}
 }
 
+/* ── 视图容器：桌面端每个视图占满内容区高度，不堆在上半屏 ───────────── */
+
+.trading-view {
+	display: grid;
+	align-content: start;
+	gap: 12px;
+	min-height: calc(100vh - 232px);
+	min-width: 0;
+}
+
+/* 总览：状态条与资产行固定高，剩余高度全部交给两栏仪表盘。 */
+.trading-view-overview {
+	grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.trading-view-overview > .trading-overview-grid {
+	grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+	align-items: stretch;
+}
+
+.trading-overview-col {
+	display: grid;
+	grid-template-rows: minmax(0, 1fr) auto;
+	gap: 12px;
+	min-width: 0;
+}
+
+/* 待办卡在左列占满剩余高度：条目从顶部自然堆叠，底部由状态行收住。 */
+.trading-overview-col > .trading-attention {
+	flex: 1;
+}
+
+.trading-attention ul {
+	flex: 1;
+	align-content: start;
+	gap: 10px;
+	overflow-y: auto;
+	scrollbar-width: thin;
+}
+
+.trading-attention li {
+	padding: 12px 14px;
+}
+
+.trading-attention-foot {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	margin-top: auto;
+	padding: 10px 16px 12px;
+	border-top: 1px solid var(--line-soft);
+	color: var(--theme-muted);
+	font-size: var(--fs-caption);
+}
+
+/* 资产构成卡同样把图例均匀分布到整卡高度。 */
+.trading-allocation > .trading-alloc-legend {
+	flex: 1;
+	align-content: space-evenly;
+}
+
+.trading-allocation > .trading-alloc-note {
+	margin-top: auto;
+}
+
+/* 市场环境：头卡 + KPI 行固定高，判断依据与行业强度双栏吃掉剩余高度。 */
+.trading-view-market {
+	grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.trading-view-market .trading-market-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 13px 16px;
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--theme-blue);
+	border-radius: 12px;
+	background: var(--theme-surface, var(--surface));
+	box-shadow: 0 8px 24px var(--theme-shadow, rgba(30, 52, 78, 0.06));
+}
+
+.trading-view-market .trading-market-grid {
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--theme-surface, var(--surface));
+	box-shadow: 0 8px 24px var(--theme-shadow, rgba(30, 52, 78, 0.06));
+	overflow: hidden;
+}
+
+.trading-market-detail {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	gap: 12px;
+	align-items: stretch;
+}
+
+.trading-market-detail > .trading-panel {
+	min-height: 0;
+}
+
+/* 判断依据在拉伸高度下按分隔线列表展开，间距由条目内边距承担。 */
+.trading-market-detail .trading-note-list {
+	gap: 0;
+	align-content: space-evenly;
+}
+
+.trading-market-detail .trading-note-list li {
+	padding: 14px 0;
+	border-bottom: 1px dashed var(--line-soft);
+}
+
+.trading-market-detail .trading-note-list li:last-child {
+	border-bottom: 0;
+}
+
+/* 行业强度行式表：名称 + 占比条 + 涨跌幅 + 上涨/总家数，比胶囊列表更桌面化。 */
+.trading-industry-table {
+	display: grid;
+	gap: 2px;
+	align-content: start;
+	font-variant-numeric: tabular-nums;
+}
+
+.trading-industry-table > div {
+	display: grid;
+	grid-template-columns: 92px minmax(0, 1fr) 62px 46px;
+	align-items: center;
+	gap: 10px;
+	padding: 5px 8px;
+	border-radius: 6px;
+}
+
+.trading-industry-table > div:nth-child(odd) {
+	background: var(--theme-surface-soft, var(--surface-2));
+}
+
+.trading-industry-table .name {
+	overflow: hidden;
+	color: var(--theme-text, var(--text));
+	font-size: var(--fs-small);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.trading-industry-table .bar {
+	height: 6px;
+	border-radius: 999px;
+	background: var(--line-soft);
+	overflow: hidden;
+}
+
+.trading-industry-table .bar i {
+	display: block;
+	height: 100%;
+	border-radius: 999px;
+	background: currentColor;
+	opacity: 0.55;
+}
+
+.trading-industry-table strong {
+	font-size: var(--fs-small);
+	font-weight: 700;
+	text-align: right;
+	white-space: nowrap;
+}
+
+.trading-industry-table em {
+	color: var(--theme-muted);
+	font-size: var(--fs-caption);
+	font-style: normal;
+	text-align: right;
+}
+
+/* 选股页右栏：候选池 + 计划详情纵向串联。 */
+.trading-plan-col {
+	display: grid;
+	align-content: start;
+	gap: 12px;
+	min-width: 0;
+}
+
+/* 日志类双栏：交易员日志 | 决策时间线、告警 | 运行事件。 */
+.trading-duo {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	gap: 12px;
+	align-items: start;
+}
+
+/* 选股页左栏的历史计划块：与生成表单同栏，用分隔线隔开。 */
+.trading-plan-history {
+	display: grid;
+	gap: 8px;
+	padding-top: 12px;
+	border-top: 1px solid var(--line-soft);
+}
+
+.trading-plan-history > header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	color: var(--theme-muted);
+}
+
+.trading-plan-history > header svg {
+	color: var(--theme-blue);
+}
+
+.trading-plan-history > header h3 {
+	font-size: var(--fs-body);
+	font-weight: 700;
+}
+
+.trading-plan-history > header .trading-subtle {
+	margin-left: auto;
+}
+
 /* ── 窄屏回退（桌面为主，窗口拉窄时保持可读） ───────────────────────── */
 
 @media (max-width: 1400px) {
@@ -3205,8 +3409,19 @@ button.trading-status-tile:hover {
 
 @media (max-width: 1240px) {
 	.trading-overview-grid,
-	.trading-grid {
+	.trading-view-overview > .trading-overview-grid,
+	.trading-grid,
+	.trading-duo,
+	.trading-market-detail {
 		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.trading-view {
+		min-height: 0;
+	}
+
+	.trading-overview-col {
+		grid-template-rows: auto auto;
 	}
 
 	.trading-status-strip {

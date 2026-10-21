@@ -2,6 +2,7 @@ import {
 	Activity,
 	AlertTriangle,
 	Banknote,
+	BarChart3,
 	BellRing,
 	Brain,
 	CalendarClock,
@@ -167,8 +168,10 @@ function intervalText(seconds: number): string {
 /** 市场环境：确定性统计结果，与生成计划时用的是同一套计算。 */
 function MarketPanel({ market, onRefresh, busy }: { market: TradeMarketView; onRefresh: () => void; busy: boolean }) {
 	const breadth = market.breadth;
+	// 行业条形图的比例尺：以最强行业为 100%，纯展示换算，不改任何数据。
+	const industryMax = Math.max(...(market.industries ?? []).map((item) => Math.abs(item.average_change)), 0.01);
 	return (
-		<div className={`trading-market regime-${market.regime}`}>
+		<div className={`trading-view trading-view-market regime-${market.regime}`}>
 			<div className="trading-market-head">
 				<div className="trading-market-title">
 					<Activity size={17} />
@@ -181,7 +184,7 @@ function MarketPanel({ market, onRefresh, busy }: { market: TradeMarketView; onR
 						</span>
 					</div>
 				</div>
-				<button type="button" className="trading-link" onClick={onRefresh} disabled={busy}>
+				<button type="button" className="trading-ghost" onClick={onRefresh} disabled={busy}>
 					{busy ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />} 刷新
 				</button>
 			</div>
@@ -207,28 +210,42 @@ function MarketPanel({ market, onRefresh, busy }: { market: TradeMarketView; onR
 					<strong>{amountText(breadth.total_amount)}</strong>
 				</div>
 			</div>
-			<details className="trading-details" open>
-				<summary>
-					<ChevronDown size={13} /> 判断依据与行业强度
-				</summary>
-				<ul className="trading-note-list">
-					{(market.notes ?? []).map((note) => (
-						<li key={note}>{note}</li>
-					))}
-				</ul>
-				{market.industries && market.industries.length > 0 ? (
-					<div className="trading-industry-chips">
-						{market.industries.map((item) => (
-							<span key={item.name} className={item.average_change >= 0 ? 'up' : 'down'}>
-								{item.name} {signedPercent(item.average_change)}
-								<em>
-									{item.advancing}/{item.total}
-								</em>
-							</span>
+			{/* 桌面程序不折叠：判断依据与行业强度固定双栏展示，屏幕够宽就同时可见。 */}
+			<div className="trading-market-detail">
+				<section className="trading-panel">
+					<header>
+						<Compass size={16} />
+						<h2>判断依据</h2>
+						<span className="trading-subtle">{(market.notes ?? []).length} 条</span>
+					</header>
+					<ul className="trading-note-list">
+						{(market.notes ?? []).map((note) => (
+							<li key={note}>{note}</li>
 						))}
-					</div>
-				) : null}
-			</details>
+					</ul>
+				</section>
+				<section className="trading-panel">
+					<header>
+						<BarChart3 size={16} />
+						<h2>行业强度</h2>
+						<span className="trading-subtle">{market.industries?.length ?? 0} 个行业</span>
+					</header>
+					{market.industries && market.industries.length > 0 ? (
+						<div className="trading-industry-table">
+							{market.industries.map((item) => (
+								<div key={item.name} className={item.average_change >= 0 ? 'up' : 'down'}>
+									<span className="name">{item.name}</span>
+									<div className="bar" aria-hidden="true"><i style={{ width: `${(Math.abs(item.average_change) / industryMax) * 100}%` }} /></div>
+									<strong>{signedPercent(item.average_change)}</strong>
+									<em>{item.advancing}/{item.total}</em>
+								</div>
+							))}
+						</div>
+					) : (
+						<p className="trading-empty">暂无行业明细</p>
+					)}
+				</section>
+			</div>
 		</div>
 	);
 }
@@ -1347,12 +1364,14 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							<div>{group.modules.map((module) => {
 								const Icon = tradingModuleIcons[module.id];
 								const badge = navBadges[module.id];
+								// 桌面软件的导航是单行「图标 + 名称 + 徽标」：描述放进悬浮提示，
+								// 导航省出的每一行都还给内容区。
 								return (
-									<button type="button" key={module.id} className={activeView === module.id ? 'active' : ''} onClick={() => selectTradingView(module.id)}>
-										<Icon size={15} />
-										<span><strong>{module.name}</strong><small>{module.description}</small></span>
-										{badge ? <em>{badge}</em> : null}
-									</button>
+								<button type="button" key={module.id} className={activeView === module.id ? 'active' : ''} onClick={() => selectTradingView(module.id)} title={module.description}>
+									<Icon size={15} />
+									<span>{module.name}</span>
+									{badge ? <em>{badge}</em> : null}
+								</button>
 								);
 							})}</div>
 						</section>
@@ -1401,7 +1420,7 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 				)}
 
 				{activeView === 'overview' && (
-					<>
+					<div className="trading-view trading-view-overview">
 						{/* 四块状态条：自动运行、市场环境、健康、门控。
 						    它们回答「系统现在在不在工作」，比盈亏更该被先看到。 */}
 						<section className="trading-status-panel" aria-label="运行状态">
@@ -1529,10 +1548,11 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							</article>
 						</div>
 
-						{/* 待办放在资产之后：先知道自己有多少钱，再决定要不要处理这些事。
-						    右栏资产构成条同样只读账户快照，用一条堆叠条把持仓/现金/冻结的比例画出来。 */}
+						{/* 桌面仪表盘两栏：左列是「要处理的事 + 口径对账」，右列是资产构成。
+						    行高由视口撑满（.trading-view-overview 的 1fr 行），不堆在页面上半截。 */}
 						<div className="trading-overview-grid">
-							<section className="trading-attention">
+							<div className="trading-overview-col">
+								<section className="trading-attention">
 								<header>
 									<ShieldAlert size={16} />
 									<h2>需要你处理</h2>
@@ -1551,7 +1571,32 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 										))}
 									</ul>
 								)}
+								{/* 状态行贴住卡底：条目少时卡片仍有完整收尾，不显得半截空。 */}
+								<footer className="trading-attention-foot">
+									<span>以上事项由每轮自动巡检生成，处理后自动消失</span>
+									<button type="button" className="trading-link" onClick={() => selectTradingView('ops')}>查看运行事件</button>
+								</footer>
 							</section>
+
+							{/* 两个数字口径不同，必须有一行把中间项摆出来。
+							    少了它，"总资产 -630"和"浮动 +672"看上去就是矛盾的。 */}
+							{account?.account.pnl && (
+								<div className={`trading-pnl-check ${account.account.pnl.aligned ? 'ok' : 'warn'}`}>
+									<span>
+										总资产变动 {signedMoney(account.account.pnl.change)} = 已实现 {signedMoney(account.account.pnl.realized)}
+										{' + '}
+										浮动 {signedMoney(account.account.pnl.unrealized)}
+										{account.account.pnl.aligned ? '' : ` + 残差 ${signedMoney(account.account.pnl.residual)}`}
+									</span>
+									<em>累计费用 {formatMoney(account.account.pnl.fees)}（已含在上面两项里，不再单独扣一次）</em>
+									<b>
+										{account.account.pnl.aligned
+											? '对账通过'
+											: `差额 ${signedMoney(account.account.pnl.residual)}（此类差额来自早期建仓成本未计买入费，该口径已修复）`}
+									</b>
+								</div>
+							)}
+							</div>
 
 							<section className="trading-allocation">
 								<header>
@@ -1594,26 +1639,7 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 								</p>
 							</section>
 						</div>
-
-						{/* 两个数字口径不同，必须有一行把中间项摆出来。
-						    少了它，"总资产 -630"和"浮动 +672"看上去就是矛盾的。 */}
-						{account?.account.pnl && (
-							<div className={`trading-pnl-check ${account.account.pnl.aligned ? 'ok' : 'warn'}`}>
-								<span>
-									总资产变动 {signedMoney(account.account.pnl.change)} = 已实现 {signedMoney(account.account.pnl.realized)}
-									{' + '}
-									浮动 {signedMoney(account.account.pnl.unrealized)}
-									{account.account.pnl.aligned ? '' : ` + 残差 ${signedMoney(account.account.pnl.residual)}`}
-								</span>
-								<em>累计费用 {formatMoney(account.account.pnl.fees)}（已含在上面两项里，不再单独扣一次）</em>
-								<b>
-									{account.account.pnl.aligned
-										? '对账通过'
-										: `差额 ${signedMoney(account.account.pnl.residual)}（此类差额来自早期建仓成本未计买入费，该口径已修复）`}
-								</b>
-							</div>
-						)}
-					</>
+					</div>
 				)}
 
 				{activeView === 'market' && (board?.market?.evaluated ? (
@@ -1623,7 +1649,7 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 				))}
 
 				{activeView === 'planning' && (
-					<>
+					<div className="trading-view">
 						{/* 四步流程写在页面顶上：第一次用这个模块的人不必猜「先生成还是先选股」。 */}
 						<div className="trading-steps">
 							{([
@@ -1637,7 +1663,6 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 						</div>
 						{/* 候选池是「选股」这一步的结果：它必须在生成计划之前被看到，
 						    否则用户不知道模型是在什么范围里选的。 */}
-						<UniversePanel board={board} loading={boardLoading} onRefresh={() => void loadBoard()} />
 						<div className="trading-grid">
 						<aside className="trading-panel">
 							<header>
@@ -1691,8 +1716,35 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 								模型只输出方向与目标权重；股数按账户总资产与限价换算，超出风控阈值的建议会被逐条拒绝并给出原因。
 							</p>
 							<button type="button" className="trading-link" onClick={() => void handleReset()}>重置模拟盘资金</button>
+
+							{/* 历史计划与生成表单同栏：选股 → 生成 → 回看上一份，视线不用左右横跳。 */}
+							{plans.length > 0 && (
+								<div className="trading-plan-history">
+									<header>
+										<History size={14} />
+										<h3>历史计划</h3>
+										<span className="trading-subtle">最近 10 份</span>
+									</header>
+									<ul className="trading-history">
+										{plans.map((plan) => (
+											<li key={plan.id}>
+												<button type="button" className={active?.id === plan.id ? 'active' : ''} onClick={() => void openPlanById(plan.id)}>
+													<strong>{plan.regime || '未标注'}</strong>
+													<span>{new Date(plan.created_at).toLocaleString('zh-CN')}</span>
+													<em className={`trading-status ${plan.status}`}>{tradePlanStatusText[plan.status]}</em>
+													<small>{(plan.orders ?? []).length} 笔 · {plan.summary?.slice(0, 40) || plan.error || '—'}</small>
+												</button>
+											</li>
+										))}
+									</ul>
+								</div>
+							)}
 						</aside>
 
+						{/* 右栏：候选池在计划详情上方——模型就是从这个池子里选的，
+						    先看选了什么，再看它给出的计划，视线自上而下走完流程。 */}
+						<div className="trading-plan-col">
+						<UniversePanel board={board} loading={boardLoading} onRefresh={() => void loadBoard()} />
 						<main className="trading-panel trading-plan">
 							<header>
 								<Wallet size={17} />
@@ -1772,31 +1824,12 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							)}
 						</main>
 						</div>
-
-						{/* 历史计划放在同页底部而不是独立入口：点一条记录，详情立刻在上方「计划详情」
-						    里可见，不需要在两个页面之间来回跳。 */}
-						{plans.length > 0 && (
-							<section className="trading-panel">
-								<header><History size={17} /><h2>历史计划</h2><span className="trading-subtle">最近 10 份 · 点击在上方查看详情</span></header>
-								<ul className="trading-history">
-									{plans.map((plan) => (
-										<li key={plan.id}>
-											<button type="button" className={active?.id === plan.id ? 'active' : ''} onClick={() => void openPlanById(plan.id)}>
-												<strong>{plan.regime || '未标注'}</strong>
-												<span>{new Date(plan.created_at).toLocaleString('zh-CN')}</span>
-												<em className={`trading-status ${plan.status}`}>{tradePlanStatusText[plan.status]}</em>
-												<small>{(plan.orders ?? []).length} 笔 · {plan.summary?.slice(0, 40) || plan.error || '—'}</small>
-											</button>
-										</li>
-									))}
-								</ul>
-							</section>
-						)}
-					</>
+						</div>
+					</div>
 				)}
 
 				{activeView === 'positions' && (
-					<>
+					<div className="trading-view">
 						<section className="trading-panel">
 							<header>
 								<Wallet size={17} />
@@ -1894,9 +1927,13 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							</div>
 						</section>
 
-						{active && pendingOrders.length > 0 && (
-							<section className="trading-panel">
-								<header><RefreshCw size={17} /><h2>挂单</h2><span className="trading-subtle">限价未触及前保持挂起</span></header>
+						{/* 挂单区始终在页面上：有单看单，没单给空态。桌面程序不该有一块区域
+						    时有时无，位置稳定才能形成肌肉记忆。 */}
+						<section className="trading-panel">
+							<header><RefreshCw size={17} /><h2>挂单</h2><span className="trading-subtle">限价未触及前保持挂起</span></header>
+							{pendingOrders.length === 0 ? (
+								<p className="trading-empty">当前没有等待成交的挂单。计划确认后未触及限价的委托会出现在这里。</p>
+							) : (
 								<div className="trading-pending">
 									{pendingOrders.map((order) => (
 										<PendingOrder key={order.id} order={order} onCancel={async () => {
@@ -1911,13 +1948,13 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 										}} />
 									))}
 								</div>
-							</section>
-						)}
-					</>
+							)}
+						</section>
+					</div>
 				)}
 
 				{activeView === 'autopilot' && (
-					<>
+					<div className="trading-view trading-view-autopilot">
 						<AutopilotPanel
 							status={autopilot}
 							busy={autopilotBusy}
@@ -1927,28 +1964,30 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							onResetBreaker={() => void handleResetBreaker()}
 							onReleaseDrawdown={() => void handleReleaseDrawdown()}
 						/>
-						<CycleLog cycles={cycles} config={config} onOpenPlan={(planId) => void openPlanById(planId)} />
-						{/* 决策时间线与周期日志同页：两者都是「看系统干了什么」，
-						    区别只是时间线按日回放、日志看最近 20 轮。 */}
-						<TimelinePanel
-							day={timelineDay}
-							timeline={timeline}
-							loading={timelineLoading}
-							onChangeDay={setTimelineDay}
-							onRefresh={() => void loadTimeline(timelineDay)}
-						/>
-					</>
+						{/* 交易员日志与决策时间线双栏对照：左看最近 20 轮做了什么，
+						    右按日回放为什么这么做，同一屏内互相印证。 */}
+						<div className="trading-duo">
+							<CycleLog cycles={cycles} config={config} onOpenPlan={(planId) => void openPlanById(planId)} />
+							<TimelinePanel
+								day={timelineDay}
+								timeline={timeline}
+								loading={timelineLoading}
+								onChangeDay={setTimelineDay}
+								onRefresh={() => void loadTimeline(timelineDay)}
+							/>
+						</div>
+					</div>
 				)}
 
 				{activeView === 'performance' && (
-					<>
+					<div className="trading-view">
 						<PerformancePanel performance={performance} onRefresh={() => void loadReview()} />
 						<CalibrationPanel report={calibration} />
-					</>
+					</div>
 				)}
 
 				{activeView === 'review' && (
-					<>
+					<div className="trading-view">
 						<ReviewPanel
 							review={reviews[0] ?? null}
 							history={reviews}
@@ -1963,21 +2002,24 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 							busy={memoryBusy}
 							onSync={() => void handleSyncMemory()}
 						/>
-					</>
+					</div>
 				)}
 
 				{activeView === 'ops' && (
-					<>
+					<div className="trading-view trading-view-ops">
 						<HealthBar health={health} channel={channel} onRefresh={() => void loadOps()} />
-						<AlertPanel
-							alerts={alerts}
-							health={health}
-							testing={alertTesting}
-							onTest={() => void handleTestAlert()}
-							onRefresh={() => void loadOps()}
-						/>
-						<OpsLog events={events} onRefresh={() => void loadOps()} />
-					</>
+						{/* 告警与运行事件双栏：左看「该收到什么通知」，右看「系统刚发生了什么」。 */}
+						<div className="trading-duo">
+							<AlertPanel
+								alerts={alerts}
+								health={health}
+								testing={alertTesting}
+								onTest={() => void handleTestAlert()}
+								onRefresh={() => void loadOps()}
+							/>
+							<OpsLog events={events} onRefresh={() => void loadOps()} />
+						</div>
+					</div>
 				)}
 			</div>
 		</section>
