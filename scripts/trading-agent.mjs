@@ -142,6 +142,17 @@ const healthTimer = setInterval(() => void checkHealth(), healthIntervalMS);
 // 静态托管是只读的：它只把 dist 里的文件发出去，不写盘、不代理、不改请求。
 // 之所以不让它反向代理 API，是因为前端默认直接打到 20081，
 // 多一层代理会多一个"到底哪层出错"的排查面。
+
+// statSync 在 existsSync 之后仍可能抛（文件在两次调用之间被删掉）。
+// 它只用来判断目录，抛错就当成"不是目录"，随后由缺失检查给出 503。
+function isDirectory(target) {
+	try {
+		return fs.statSync(target).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 function startWebServer() {
 	const indexFile = path.join(distDir, 'index.html');
 	if (!fs.existsSync(indexFile)) {
@@ -179,9 +190,22 @@ function startWebServer() {
 			res.writeHead(403).end('forbidden');
 			return;
 		}
-		if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+		if (!fs.existsSync(filePath) || isDirectory(filePath)) {
 			// 单页应用：未知路径一律回 index.html，由前端路由处理。
 			filePath = indexFile;
+		}
+		// 构建期间 dist 会被清空重建，此时连 index.html 都不在。
+		// 必须在这里给出明确的 503，而不是让后面的读流抛 ENOENT——
+		// 那个错误没人接，会变成未捕获异常把守护进程整个打死，
+		// 于是"服务挂了要拉起来"的职责反而失效。
+		if (!fs.existsSync(filePath)) {
+			res.writeHead(503, {
+				'Content-Type': 'text/plain; charset=utf-8',
+				'Retry-After': '2',
+				'Cache-Control': 'no-store',
+			}).end('前端构建产物正在重建，请 2 秒后刷新');
+			console.error(`[agent] 静态文件缺失（构建中？）path=${filePath}`);
+			return;
 		}
 		const ext = path.extname(filePath).toLowerCase();
 		const immutable = urlPath.startsWith('/assets/');
@@ -191,7 +215,19 @@ function startWebServer() {
 			// 否则升级后用户会一直拿到旧版本的入口。
 			'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
 		});
-		fs.createReadStream(filePath).pipe(res);
+		// 存在性检查与真正打开之间仍有窗口：构建完成时会替换整个 dist。
+		// 所以读流必须有 error 处理器，否则同样会以未捕获异常收场。
+		const stream = fs.createReadStream(filePath);
+		stream.on('error', (error) => {
+			console.error(`[agent] 静态文件读取失败 path=${filePath} err=${error.code || error.message}`);
+			if (res.headersSent) {
+				res.destroy();
+				return;
+			}
+			res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+				.end('文件正在更新，请刷新');
+		});
+		stream.pipe(res);
 	});
 	server.on('error', (error) => {
 		console.error(`[agent] 前端托管失败：${error.message}`);
