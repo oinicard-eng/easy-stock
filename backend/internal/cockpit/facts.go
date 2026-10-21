@@ -15,6 +15,15 @@ type IndexQuote struct {
 	TradeTime     string  `json:"trade_time,omitempty"`
 }
 
+// Scores 是情绪分的三个维度。收盘快照与盘中快照共用同名同权重的维度，
+// 盘中只是把因子换成实时可得的读数，前端据同一套权重展示算法拆解。
+type Scores struct {
+	Heat      float64 `json:"heat"`
+	Profit    float64 `json:"profit"`
+	Structure float64 `json:"structure"`
+	Total     float64 `json:"total"`
+}
+
 type Emotion struct {
 	TradeDate      string  `json:"trade_date"`
 	Score          float64 `json:"score"`
@@ -25,9 +34,12 @@ type Emotion struct {
 	FinalBreakRate float64 `json:"final_break_rate"`
 	MaxStreak      int     `json:"max_streak"`
 	FirstBoard     int     `json:"first_board"`
+	Scores         Scores  `json:"scores"`
 }
 
 type IntradayView struct {
+	TradeDate         string  `json:"trade_date"`
+	SessionStatus     string  `json:"session_status"`
 	Status            string  `json:"status"`
 	Breadth           string  `json:"breadth"`
 	Summary           string  `json:"summary"`
@@ -37,6 +49,15 @@ type IntradayView struct {
 	PreviousMaxStreak int     `json:"previous_max_streak"`
 	HighDownRate      float64 `json:"high_down_rate"`
 	HighWeakRate      float64 `json:"high_weak_rate"`
+	// 盘中情绪分：涨停/炸板/跌停池与昨日涨停股实时表现都在盘中变化，
+	// 收盘后由正式情绪分接管，两者口径分开标注。
+	Broken                int     `json:"broken"`
+	LimitDown             int     `json:"limit_down"`
+	SealRate              float64 `json:"seal_rate"`
+	PreviousLimitUpReturn float64 `json:"previous_limit_up_return"`
+	PoolAvailable         bool    `json:"pool_available"`
+	ScoreAvailable        bool    `json:"score_available"`
+	Scores                Scores  `json:"scores"`
 }
 
 type LimitUpView struct {
@@ -84,7 +105,59 @@ func BuildMoveBoard(items []FlowItem, n int) *FlowBoard {
 			board.Outflow = append(board.Outflow, sorted[i])
 		}
 	}
+	// 盘前上游会给出全 0 样本：两侧都取不到条目时返回 nil，让上层按「无数据」兜底，
+	// 而不是把一张空榜当成有效数据挡住回退逻辑。
+	if len(board.Inflow) == 0 && len(board.Outflow) == 0 {
+		return nil
+	}
 	return board
+}
+
+// CarryOverBoards 用上一轮的非空数据补齐这一轮的空缺：上游在盘前/休市时段对概念资金
+// 等接口返回空列表，直接透传会让「题材涨跌」「资金流向」卡整体消失。原则：在拿到
+// 新数据之前，展示最近一次成功读取的数据，而不是把模块隐藏。
+func CarryOverBoards(prev, next Facts) Facts {
+	if boardEmpty(next.Industry) {
+		next.Industry = prev.Industry
+	}
+	if boardEmpty(next.Concepts) {
+		next.Concepts = prev.Concepts
+	}
+	if boardEmpty(next.ConceptMoves) {
+		next.ConceptMoves = prev.ConceptMoves
+	}
+	if len(next.News) == 0 {
+		next.News = prev.News
+	}
+	return next
+}
+
+// SeedCarryFromBriefs 从历史巡查记录里找出最近一次带数据的字段，作为服务启动后的
+// 初始兜底（内存里的 carry 会随重启丢失，但记录是持久化的）。逐字段独立取最近值。
+func SeedCarryFromBriefs(briefs []Brief) Facts {
+	var carry Facts
+	need := func(f *Facts) bool {
+		return boardEmpty(f.Industry) || boardEmpty(f.Concepts) || boardEmpty(f.ConceptMoves) || len(f.News) == 0
+	}
+	for i := range briefs {
+		if !need(&carry) {
+			break
+		}
+		facts := briefs[i].Facts
+		if boardEmpty(carry.Industry) {
+			carry.Industry = facts.Industry
+		}
+		if boardEmpty(carry.Concepts) {
+			carry.Concepts = facts.Concepts
+		}
+		if boardEmpty(carry.ConceptMoves) {
+			carry.ConceptMoves = facts.ConceptMoves
+		}
+		if len(carry.News) == 0 {
+			carry.News = facts.News
+		}
+	}
+	return carry
 }
 
 type NewsLine struct {
@@ -142,7 +215,15 @@ func BuildFlowBoard(items []FlowItem, n int) *FlowBoard {
 			board.Outflow = append(board.Outflow, sorted[i])
 		}
 	}
+	if len(board.Inflow) == 0 && len(board.Outflow) == 0 {
+		return nil
+	}
 	return board
+}
+
+// boardEmpty 判断一张资金榜是否真正可用：nil 或两侧都取不到条目都算无数据。
+func boardEmpty(board *FlowBoard) bool {
+	return board == nil || (len(board.Inflow) == 0 && len(board.Outflow) == 0)
 }
 
 // CollectFacts 并发采集本阶段需要的数据。单个数据源失败只记录在 Sources 中，

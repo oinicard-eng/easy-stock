@@ -17,6 +17,8 @@ import {
 	narrativeNotice,
 	narrativeVerifyRule,
 	intradaySummary,
+	latestIntradayFallback,
+	fetchPatrolBriefs,
 	stripLeadingTitle,
 	patrolPhaseLabel,
 	patrolPhases,
@@ -50,10 +52,10 @@ export function formatMoney(value: number) {
 }
 
 // 事实卡：既是图表容器，也是进入对应工作台的入口。整卡可点，悬停时才露出目标页名称。
-function Fact({ title, icon, source, badge, children, wide = false, onOpen, openLabel, centerBadge = false }: { title: string; icon?: ReactNode; source?: string; badge?: ReactNode; children: ReactNode; wide?: boolean; onOpen?: () => void; openLabel?: string; centerBadge?: boolean }) {
+function Fact({ title, icon, source, badge, children, wide = false, onOpen, openLabel, centerBadge = false, className }: { title: string; icon?: ReactNode; source?: string; badge?: ReactNode; children: ReactNode; wide?: boolean; onOpen?: () => void; openLabel?: string; centerBadge?: boolean; className?: string }) {
 	return (
 		<section
-			className={`patrol-fact${wide ? ' is-wide' : ''}${onOpen ? ' is-clickable' : ''}`}
+			className={`patrol-fact${wide ? ' is-wide' : ''}${onOpen ? ' is-clickable' : ''}${className ? ` ${className}` : ''}`}
 			role={onOpen ? 'link' : undefined}
 			tabIndex={onOpen ? 0 : undefined}
 			aria-label={onOpen && openLabel ? `${title}，打开${openLabel}` : undefined}
@@ -166,66 +168,133 @@ function LadderColumns({ limitUp, previousMax }: { limitUp: PatrolLimitUp; previ
 	);
 }
 
-// 情绪周期：涨停 / 跌停 / 炸板 的构成用环形图，中心放情绪分，旁边按数量与占比列出。
-function EmotionDonut({ emotion }: { emotion: PatrolEmotion }) {
-	const parts = [
-		{ label: '涨停', value: emotion.limit_up, tone: 'up' },
-		{ label: '跌停', value: emotion.limit_down, tone: 'down' },
-		{ label: '炸板', value: emotion.broken, tone: 'warn' },
-	];
-	const total = parts.reduce((sum, part) => sum + Math.max(0, part.value), 0);
+// 情绪周期：圆环画总分，右侧三行是算法拆解。盘中用实时因子算「盘中情绪」，
+// 收盘后用日线快照的正式情绪分；两种口径共用同一套三维度权重。
+const EMOTION_DIMS = [
+	{ key: 'heat', label: '热度', weight: 35 },
+	{ key: 'profit', label: '赚钱', weight: 40 },
+	{ key: 'structure', label: '结构', weight: 25 },
+] as const;
+
+const LIVE_EMOTION_FORMULA = [
+	'盘中试算：因子取当前实时值',
+	'热度 35% = 涨停 30% + 封板率 30% + 最高板 15% + 连板 15% + 跌停 10%',
+	'赚钱 40% = 昨涨停今表现 60% + 高位股平均涨幅 40%',
+	'结构 25% = 高位风险 50% + 高位下跌率 30% + 高度断层 20%',
+	'炸板/跌停池不可用时相关因子退出，剩余权重归一；收盘后切换为正式情绪分。',
+].join('\n');
+
+const CLOSE_EMOTION_FORMULA = [
+	'收盘模型：历史分位校准',
+	'热度 35% = 涨停 25% + 最高板 20% + 连板 15% + 跌停 20% + 炸板率 20%',
+	'赚钱 40% = 昨涨停收益 35% + 昨连板收益 25% + 开盘溢价 15% + 核心股收益 25%',
+	'结构 25% = 上涨占比 30% + 题材聚焦 20% + 连板连续 20% + 高位风险 20% + 中位杀跌 10%',
+].join('\n');
+
+function EmotionGauge({ emotion, live, intraday }: { emotion: PatrolEmotion; live?: PatrolLimitUp; intraday?: PatrolIntraday }) {
+	// 盘中快照的日期新于日线快照时才接管，避免收盘后两个口径来回跳。
+	const liveMode = Boolean(
+		intraday?.score_available && intraday.scores && intraday.trade_date && intraday.trade_date !== emotion.trade_date,
+	);
+	const stale = !liveMode && Boolean(live && live.trade_date && live.trade_date !== emotion.trade_date);
+	const scores = liveMode ? intraday?.scores : emotion.scores;
+	const total = liveMode ? (intraday?.scores?.total ?? emotion.score) : emotion.score;
+	const value = Number.isFinite(total) ? Math.max(0, Math.min(100, total)) : 0;
+	const tone = value >= 60 ? 'hot' : value >= 35 ? 'warm' : 'cool';
 	const radius = 50;
 	const circumference = 2 * Math.PI * radius;
-	let cursor = 0;
-	const segments = parts.map((part) => {
-		const length = total ? (Math.max(0, part.value) / total) * circumference : 0;
-		const segment = { ...part, length, offset: cursor };
-		cursor += length;
-		return segment;
-	});
+	const arc = (value / 100) * circumference;
+	const change = intraday?.previous_limit_up_return;
+	const changeClass = typeof change === 'number' && change > 0 ? 'is-up' : typeof change === 'number' && change < 0 ? 'is-down' : undefined;
 	return (
 		<>
 			<div className="emotion">
-				<div className="emotion-donut">
-					<svg viewBox="0 0 120 120" role="img" aria-label={parts.map((part) => `${part.label} ${part.value}`).join('，')}>
+				<div className="emotion-donut is-gauge">
+					<svg viewBox="0 0 120 120" role="img" aria-label={`${liveMode ? '盘中情绪' : '情绪分'} ${value.toFixed(1)}`}>
 						<circle className="emotion-track" cx="60" cy="60" r={radius} />
-						{segments.map((segment) => (
-							<circle
-								key={segment.label}
-								className={`tone-${segment.tone}`}
-								cx="60"
-								cy="60"
-								r={radius}
-								strokeDasharray={`${Math.max(1, segment.length - 2.5)} ${circumference}`}
-								strokeDashoffset={-segment.offset}
-								transform="rotate(-90 60 60)"
-							/>
-						))}
+						<circle
+							className={`emotion-value is-${tone}`}
+							cx="60"
+							cy="60"
+							r={radius}
+							strokeDasharray={`${Math.max(1.5, arc)} ${circumference}`}
+							transform="rotate(-90 60 60)"
+						/>
+						{[25, 50, 75].map((tick) => {
+							const angle = (tick / 100) * 2 * Math.PI - Math.PI / 2;
+							return (
+								<line
+									key={tick}
+									className="emotion-tick"
+									x1={60 + Math.cos(angle) * (radius - 9)}
+									y1={60 + Math.sin(angle) * (radius - 9)}
+									x2={60 + Math.cos(angle) * (radius - 4)}
+									y2={60 + Math.sin(angle) * (radius - 4)}
+								/>
+							);
+						})}
 					</svg>
 					<div className="emotion-center">
-						<strong>{Number.isFinite(emotion.score) ? emotion.score.toFixed(1) : '--'}</strong>
-						<span>情绪分</span>
+						<strong>{Number.isFinite(total) ? value.toFixed(1) : '--'}</strong>
+						<span>{liveMode ? '盘中情绪' : '情绪分'}</span>
 					</div>
 				</div>
-				<ul className="emotion-legend">
-					{segments.map((segment) => (
-						<li key={segment.label}>
-							<i className={`tone-${segment.tone}`} aria-hidden="true" />
-							<span>{segment.label}</span>
-							<strong>{segment.value}</strong>
-							<em>{total ? `${((segment.value / total) * 100).toFixed(1)}%` : '--'}</em>
-						</li>
-					))}
-				</ul>
+				{scores ? (
+					<ul className="emotion-dims" title={liveMode ? LIVE_EMOTION_FORMULA : CLOSE_EMOTION_FORMULA}>
+						{EMOTION_DIMS.map((dim) => {
+							const score = scores[dim.key];
+							const width = Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : 0;
+							return (
+								<li key={dim.key}>
+									<span>{dim.label}</span>
+									<i aria-hidden="true"><b style={{ width: `${width}%` }} /></i>
+									<strong>{Number.isFinite(score) ? score.toFixed(0) : '--'}</strong>
+									<em>{dim.weight}%</em>
+								</li>
+							);
+						})}
+					</ul>
+				) : null}
 			</div>
-			<div className="emotion-notes">
-				<span>
-					首板 <strong>{emotion.first_board}</strong>
-				</span>
-				<span>
-					炸板率 <strong>{(emotion.final_break_rate * 100).toFixed(1)}%</strong>
-				</span>
-			</div>
+			{liveMode && intraday ? (
+				<>
+					<div className="emotion-notes">
+						<span>涨停 <strong>{intraday.limit_up}</strong></span>
+						{intraday.pool_available ? <span>炸板 <strong>{intraday.broken}</strong></span> : null}
+						{intraday.pool_available ? <span>跌停 <strong>{intraday.limit_down}</strong></span> : null}
+						{intraday.pool_available ? <span>封板率 <strong>{Math.round((intraday.seal_rate ?? 0) * 100)}%</strong></span> : null}
+						<span>最高 <strong>{intraday.max_streak}</strong> 板</span>
+					</div>
+					<div className="emotion-notes is-sub">
+						<span>昨涨停今表现 <strong className={changeClass}>{formatPercent(change)}</strong></span>
+						<span>高位风险 <strong>{Number.isFinite(intraday.risk_score) ? Math.round(intraday.risk_score) : '--'}</strong></span>
+						<span>高位下跌率 <strong>{((intraday.high_down_rate ?? 0) * 100).toFixed(1)}%</strong></span>
+						{!intraday.pool_available ? <span className="is-missing">炸板池未取到，已按剩余因子归一</span> : null}
+					</div>
+				</>
+			) : (
+				<>
+					<div className="emotion-notes">
+						<span>涨停 <strong>{emotion.limit_up}</strong></span>
+						<span>跌停 <strong>{emotion.limit_down}</strong></span>
+						<span>炸板 <strong>{emotion.broken}</strong></span>
+						<span>首板 <strong>{emotion.first_board}</strong></span>
+					</div>
+					<div className="emotion-notes is-sub">
+						<span>炸板率 <strong>{(emotion.final_break_rate * 100).toFixed(1)}%</strong></span>
+						<span>最高 <strong>{emotion.max_streak}</strong> 板</span>
+					</div>
+					{stale && live ? (
+						<div className="emotion-live" title={`${emotion.trade_date} 收盘是最近一个完整交易日；今日收盘后 15:05 生成正式情绪分`}>
+							<span className="emotion-live-tag">今日</span>
+							<span>涨停 <b>{live.limit_up}</b></span>
+							<span>首板 <b>{live.first_board}</b></span>
+							<span>最高 <b>{live.max_streak}</b> 板</span>
+							<em>{live.session_status}</em>
+						</div>
+					) : null}
+				</>
+			)}
 		</>
 	);
 }
@@ -366,8 +435,16 @@ function MoveRow({ item, max }: { item: PatrolFlowItem; max: number }) {
 	);
 }
 
-function FactsView({ facts, onNavigate }: { facts: PatrolFacts; onNavigate?: (target: CockpitTarget, subView?: string) => void }) {
-	const { emotion, intraday, limit_up: limitUp } = facts;
+function FactsView({ facts, intradayFallback, onNavigate }: { facts: PatrolFacts; intradayFallback?: { intraday: PatrolIntraday; label: string } | null; onNavigate?: (target: CockpitTarget, subView?: string) => void }) {
+	const { emotion, limit_up: limitUp } = facts;
+	// 日线情绪快照只在收盘后生成；盘中它与盘中快照的日期不一致，需要明确标成「昨收」。
+	const emotionStale = Boolean(emotion && limitUp && limitUp.trade_date && limitUp.trade_date !== emotion.trade_date);
+	// 盘中情绪分：拿到三维度分数、且日期新于日线快照时，才接管卡片。
+	const liveEmotion = facts.intraday?.score_available && facts.intraday.scores ? facts.intraday : undefined;
+	const emotionLive = Boolean(liveEmotion?.trade_date && emotion && liveEmotion.trade_date !== emotion.trade_date);
+	// 实时采集只在盘中给出盘中判断；非盘中时段回退到最近一次巡查快照，卡片不消失、明确标注非实时。
+	const liveIntraday = facts.intraday;
+	const intraday = liveIntraday ?? intradayFallback?.intraday;
 	const [flowTab, setFlowTab] = useState<'industry' | 'concept'>('industry');
 	const overseas = (facts.overseas ?? []).filter(
 		(item) => !OMITTED_OVERSEAS_CODES.has(item.code.toUpperCase()) && !OMITTED_OVERSEAS_NAMES.has(item.name),
@@ -404,19 +481,40 @@ function FactsView({ facts, onNavigate }: { facts: PatrolFacts; onNavigate?: (ta
 			)}
 
 			{limitUp && (
-				<Fact title="涨停梯队" icon={<BarChart3 size={15} aria-hidden="true" />} source={`${limitUp.trade_date} · ${limitUp.session_status}`} wide={ladderWide} {...open('limit-up')}>
+				<Fact title="涨停梯队" icon={<BarChart3 size={15} aria-hidden="true" />} source={`${limitUp.trade_date} · ${limitUp.session_status}`} wide={ladderWide} className="is-ladder" {...open('limit-up')}>
 					<LadderColumns limitUp={limitUp} previousMax={intraday?.previous_max_streak} />
 				</Fact>
 			)}
 
 			{emotion && (
-				<Fact title="情绪周期" icon={<Gauge size={15} aria-hidden="true" />} source={`${emotion.trade_date} 收盘`} badge={<span className="patrol-badge is-soft">{emotion.phase}</span>} {...open('limit-up')}>
-					<EmotionDonut emotion={emotion} />
+				<Fact
+					title="情绪周期"
+					icon={<Gauge size={15} aria-hidden="true" />}
+					source={emotionLive && liveEmotion
+						? `${liveEmotion.trade_date} ${liveEmotion.session_status ?? '盘中'}`
+						: `${emotion.trade_date} 收盘`}
+					badge={emotionLive
+						? <span className="patrol-badge is-live">盘中试算</span>
+						: (
+							<>
+								<span className="patrol-badge is-soft">{emotion.phase}</span>
+								{emotionStale && <span className="patrol-badge is-warn">昨收</span>}
+							</>
+						)}
+					{...open('limit-up')}
+				>
+					<EmotionGauge emotion={emotion} live={limitUp} intraday={liveEmotion} />
 				</Fact>
 			)}
 
 			{intraday && (
-				<Fact title="盘中判断" icon={<Compass size={15} aria-hidden="true" />} wide={intradayWide} {...open('limit-up')}>
+				<Fact
+					title="盘中判断"
+					icon={<Compass size={15} aria-hidden="true" />}
+					source={liveIntraday ? undefined : `${intradayFallback!.label} · 非实时`}
+					wide={intradayWide}
+					{...open('limit-up')}
+				>
 					<IntradayMeters intraday={intraday} />
 				</Fact>
 			)}
@@ -900,14 +998,32 @@ function narrativeEvidence(facts?: PatrolFacts | null): string[] {
 // 与巡查记录解耦，按分钟级刷新，不会因为某次巡查失败而空白。
 export function CockpitLiveModules({ config, refreshKey, onNavigate }: { config: BackendConfig | null; refreshKey: number; onNavigate: (target: CockpitTarget, subView?: string) => void }) {
 	const live = useCockpitLiveFacts(config, refreshKey);
-	// 实时采集按指数、情绪、资金、快讯四类给出结论性读数，价格与占比都带时间与来源。
+	// 非盘中时段 /cockpit/facts 没有 intraday 读数：回退到巡查记录里最近一次盘中快照，
+	// 「盘中判断」卡保持占位，盘后复盘不受影响。只在需要时才拉一次记录，不额外轮询。
+	const [intradayFallback, setIntradayFallback] = useState<{ intraday: PatrolIntraday; label: string } | null>(null);
+	const needsFallback = Boolean(live.data && !live.data.facts.intraday);
+	useEffect(() => {
+		if (!needsFallback || !config) {
+			setIntradayFallback(null);
+			return;
+		}
+		const abort = new AbortController();
+		fetchPatrolBriefs(config, abort.signal)
+			.then((briefs) => {
+				if (!abort.signal.aborted) setIntradayFallback(latestIntradayFallback(briefs));
+			})
+			.catch(() => {
+				if (!abort.signal.aborted) setIntradayFallback(null);
+			});
+		return () => abort.abort();
+	}, [config, needsFallback, refreshKey]);
 	// 区块标题与采集状态提示已按需求移除：整段常驻不折叠，采集失败时由下方的错误段落提示。
 	return (
 		<section className="cockpit-live" aria-label="实时盘面">
 			{live.error && <p className="patrol-error"><AlertTriangle size={14} aria-hidden="true" />{live.error}</p>}
 
 			{live.data ? (
-				<FactsView facts={live.data.facts} onNavigate={onNavigate} />
+				<FactsView facts={live.data.facts} intradayFallback={intradayFallback} onNavigate={onNavigate} />
 			) : (
 				<p className="patrol-empty">{live.loading ? '正在读取盘面数据…' : '暂无盘面数据'}</p>
 			)}

@@ -982,6 +982,24 @@ func buildMarketEmotionIntraday(data limitUpLadderData, latest *marketemotion.Sn
 		BoardCount:        data.Current.BoardCount,
 		FirstBoardCount:   data.Current.FirstBoardCount,
 	}
+	// 昨日涨停/连板股今天的实时涨幅，是盘中「赚钱效应」最直接的读数。
+	var previousReturns []float64
+	var previousBoardReturns []float64
+	for _, stock := range previousStocks {
+		if stock.CurrentChangePercent == nil {
+			continue
+		}
+		change := *stock.CurrentChangePercent
+		previousReturns = append(previousReturns, change)
+		if stock.Streak >= 2 {
+			previousBoardReturns = append(previousBoardReturns, change)
+		}
+	}
+	metrics.PreviousLimitUpReturn = average(previousReturns)
+	metrics.PreviousLimitUpQuoteCount = len(previousReturns)
+	metrics.PreviousBoardReturn = average(previousBoardReturns)
+	metrics.PreviousBoardQuoteCount = len(previousBoardReturns)
+
 	returns := []float64{}
 	for _, stock := range previousStocks {
 		if _, ok := highLevelSet[stock.Streak]; !ok {
@@ -1043,6 +1061,110 @@ func buildMarketEmotionIntraday(data limitUpLadderData, latest *marketemotion.Sn
 		Confidence:    confidence,
 		Metrics:       metrics,
 	}
+}
+
+// loadIntradayPools 取当日炸板池与跌停池。盘中它们就是「此刻」的池子，
+// 与收盘后正式快照使用同一套接口，口径一致。
+func (e *marketEmotionEngine) loadIntradayPools(ctx context.Context, tradeDate string) (marketEmotionSidePools, error) {
+	if e == nil || e.pools == nil {
+		return marketEmotionSidePools{}, fmt.Errorf("no market pool provider")
+	}
+	if tradeDate == "" {
+		return marketEmotionSidePools{}, fmt.Errorf("empty intraday trade date")
+	}
+	date, err := time.ParseInLocation("2006-01-02", tradeDate, shanghaiLocation)
+	if err != nil {
+		return marketEmotionSidePools{}, fmt.Errorf("parse intraday trade date %q: %w", tradeDate, err)
+	}
+	var broken, down []foundation.MarketLimitEvent
+	var brokenErr, downErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		broken, brokenErr = e.pools.BrokenLimitUpPool(ctx, date)
+	}()
+	go func() {
+		defer wg.Done()
+		down, downErr = e.pools.LimitDownPool(ctx, date)
+	}()
+	wg.Wait()
+	if brokenErr != nil {
+		return marketEmotionSidePools{}, brokenErr
+	}
+	if downErr != nil {
+		return marketEmotionSidePools{}, downErr
+	}
+	return marketEmotionSidePools{broken: broken, down: down}, nil
+}
+
+// applyIntradayPools 把炸板/跌停池并入盘中快照，并据此给出盘中情绪分。
+// poolsOK=false 时不把缺失当成 0：炸板/跌停/封板率因子直接退出计算，其余因子按权重归一。
+func applyIntradayPools(snapshot marketemotion.IntradaySnapshot, pools marketEmotionSidePools, poolsOK bool) marketemotion.IntradaySnapshot {
+	metrics := snapshot.Metrics
+	metrics.PoolAvailable = poolsOK
+	if poolsOK {
+		metrics.BrokenCount = len(pools.broken)
+		metrics.LimitDownCount = len(pools.down)
+	}
+	snapshot.Metrics = metrics
+	if poolsOK {
+		snapshot.SealRate = divide(float64(metrics.LimitUpCount), float64(metrics.LimitUpCount+metrics.BrokenCount))
+	}
+	scores, ok := scoreIntradayEmotion(snapshot)
+	snapshot.Scores = scores
+	snapshot.ScoreAvailable = ok
+	return snapshot
+}
+
+type emotionFactor struct {
+	value  float64
+	weight float64
+	ok     bool
+}
+
+func weightedEmotionScore(factors []emotionFactor) (float64, bool) {
+	var sum, weight float64
+	for _, factor := range factors {
+		if !factor.ok || factor.weight <= 0 {
+			continue
+		}
+		sum += factor.value * factor.weight
+		weight += factor.weight
+	}
+	if weight <= 0 {
+		return 0, false
+	}
+	return clamp(sum/weight, 0, 100), true
+}
+
+// scoreIntradayEmotion 盘中情绪分：沿用收盘模型的三个维度与总权重
+// （热度 35% / 赚钱 40% / 结构 25%），因子只取盘中实时可得的读数。
+// 每个维度内部的权重写在下表，前端展示同一张表，读数可以逐项复算。
+func scoreIntradayEmotion(snapshot marketemotion.IntradaySnapshot) (marketemotion.Scores, bool) {
+	metrics := snapshot.Metrics
+	heat, heatOK := weightedEmotionScore([]emotionFactor{
+		{value: scale(float64(metrics.LimitUpCount), 10, 100), weight: 0.30, ok: true},
+		{value: scale(snapshot.SealRate, 0.40, 0.95), weight: 0.30, ok: metrics.PoolAvailable},
+		{value: scale(float64(metrics.CurrentMaxStreak), 1, 8), weight: 0.15, ok: true},
+		{value: scale(float64(metrics.BoardCount), 2, 35), weight: 0.15, ok: true},
+		{value: inverseScale(float64(metrics.LimitDownCount), 0, 30), weight: 0.10, ok: metrics.PoolAvailable},
+	})
+	profit, profitOK := weightedEmotionScore([]emotionFactor{
+		{value: centeredScore(metrics.PreviousLimitUpReturn, 10), weight: 0.60, ok: metrics.PreviousLimitUpQuoteCount > 0},
+		{value: centeredScore(metrics.HighAverageReturn, 8), weight: 0.40, ok: metrics.HighQuoteCount > 0},
+	})
+	structure, structureOK := weightedEmotionScore([]emotionFactor{
+		{value: inverseScale(snapshot.RiskScore, 15, 80), weight: 0.50, ok: true},
+		{value: inverseScale(metrics.HighDownRate*100, 10, 80), weight: 0.30, ok: metrics.HighQuoteCount > 0},
+		{value: inverseScale(float64(metrics.HeightCollapse), 0, 4), weight: 0.20, ok: metrics.PreviousMaxStreak > 0},
+	})
+	if !heatOK || !profitOK || !structureOK {
+		return marketemotion.Scores{}, false
+	}
+	scores := marketemotion.Scores{Heat: round2(heat), Profit: round2(profit), Structure: round2(structure)}
+	scores.Total = round2(0.35*scores.Heat + 0.40*scores.Profit + 0.25*scores.Structure)
+	return scores, true
 }
 
 func nearLimitDown(change float64, regime string) bool {

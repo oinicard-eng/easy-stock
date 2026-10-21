@@ -173,7 +173,20 @@ func (s *Server) cockpitFeed() cockpit.Feed {
 			if err != nil {
 				return nil, err
 			}
-			return cockpitIntraday(buildMarketEmotionIntraday(ladder, history.Latest)), nil
+			snapshot := buildMarketEmotionIntraday(ladder, history.Latest)
+			// 炸板/跌停池只对「今天」有意义；收盘正式分已生成后不再重复取池。
+			// 取不到时快照照常返回，评分自动跳过相关因子，不把缺失当成 0。
+			dailyReady := history.Latest != nil && history.Latest.TradeDate == ladder.Current.TradeDate
+			if ladder.Current.TradeDate != "" && ladder.SessionStatus != "最近交易日" && !dailyReady {
+				pools, poolErr := s.marketEmotion.loadIntradayPools(ctx, ladder.Current.TradeDate)
+				if poolErr != nil {
+					log.Printf("cockpit intraday pools %s: %v", ladder.Current.TradeDate, poolErr)
+				}
+				snapshot = applyIntradayPools(snapshot, pools, poolErr == nil)
+			} else {
+				snapshot = applyIntradayPools(snapshot, marketEmotionSidePools{}, false)
+			}
+			return cockpitIntraday(snapshot), nil
 		}
 	}
 	return feed
@@ -217,20 +230,40 @@ func cockpitEmotion(point *marketemotion.Snapshot) *cockpit.Emotion {
 		FinalBreakRate: point.Raw.FinalBreakRate,
 		MaxStreak:      point.Raw.MaxStreak,
 		FirstBoard:     point.Raw.FirstBoardCount,
+		Scores: cockpit.Scores{
+			Heat:      point.Scores.Heat,
+			Profit:    point.Scores.Profit,
+			Structure: point.Scores.Structure,
+			Total:     point.Scores.Total,
+		},
 	}
 }
 
 func cockpitIntraday(snapshot marketemotion.IntradaySnapshot) *cockpit.IntradayView {
 	return &cockpit.IntradayView{
-		Status:            snapshot.Status,
-		Breadth:           snapshot.Breadth,
-		Summary:           snapshot.Summary,
-		RiskScore:         snapshot.RiskScore,
-		LimitUp:           snapshot.Metrics.LimitUpCount,
-		MaxStreak:         snapshot.Metrics.CurrentMaxStreak,
-		PreviousMaxStreak: snapshot.Metrics.PreviousMaxStreak,
-		HighDownRate:      snapshot.Metrics.HighDownRate,
-		HighWeakRate:      snapshot.Metrics.HighWeakRate,
+		TradeDate:             snapshot.TradeDate,
+		SessionStatus:         snapshot.SessionStatus,
+		Status:                snapshot.Status,
+		Breadth:               snapshot.Breadth,
+		Summary:               snapshot.Summary,
+		RiskScore:             snapshot.RiskScore,
+		LimitUp:               snapshot.Metrics.LimitUpCount,
+		MaxStreak:             snapshot.Metrics.CurrentMaxStreak,
+		PreviousMaxStreak:     snapshot.Metrics.PreviousMaxStreak,
+		HighDownRate:          snapshot.Metrics.HighDownRate,
+		HighWeakRate:          snapshot.Metrics.HighWeakRate,
+		Broken:                snapshot.Metrics.BrokenCount,
+		LimitDown:             snapshot.Metrics.LimitDownCount,
+		SealRate:              snapshot.SealRate,
+		PreviousLimitUpReturn: snapshot.Metrics.PreviousLimitUpReturn,
+		PoolAvailable:         snapshot.Metrics.PoolAvailable,
+		ScoreAvailable:        snapshot.ScoreAvailable,
+		Scores: cockpit.Scores{
+			Heat:      snapshot.Scores.Heat,
+			Profit:    snapshot.Scores.Profit,
+			Structure: snapshot.Scores.Structure,
+			Total:     snapshot.Scores.Total,
+		},
 	}
 }
 

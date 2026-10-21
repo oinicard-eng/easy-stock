@@ -209,3 +209,72 @@ func (p *countingEmotionKLineProvider) KLine(_ context.Context, symbol string, _
 	p.calls++
 	return append([]foundation.KLine(nil), p.lines[symbol]...), nil
 }
+
+func TestScoreIntradayEmotionTracksLiveInputs(t *testing.T) {
+	snapshot := marketemotion.IntradaySnapshot{
+		RiskScore: 15,
+		SealRate:  44.0 / 61.0,
+		Metrics: marketemotion.IntradayMetrics{
+			LimitUpCount:              44,
+			BoardCount:                15,
+			CurrentMaxStreak:          4,
+			PreviousMaxStreak:         5,
+			HeightCollapse:            1,
+			BrokenCount:               17,
+			LimitDownCount:            6,
+			PoolAvailable:             true,
+			PreviousLimitUpReturn:     3.68,
+			PreviousLimitUpQuoteCount: 30,
+			HighAverageReturn:         1,
+			HighQuoteCount:            8,
+			HighDownRate:              0.375,
+		},
+	}
+	scores, ok := scoreIntradayEmotion(snapshot)
+	if !ok {
+		t.Fatal("expected an intraday score")
+	}
+	if want := round2(0.35*scores.Heat + 0.40*scores.Profit + 0.25*scores.Structure); scores.Total != want {
+		t.Fatalf("total = %v, want %v (published weights)", scores.Total, want)
+	}
+	if scores.Profit < 70 {
+		t.Fatalf("yesterday's limit-up return should lift profit: %+v", scores)
+	}
+	if scores.Heat < 45 || scores.Heat > 55 {
+		t.Fatalf("heat out of expected range: %+v", scores)
+	}
+}
+
+func TestApplyIntradayPoolsSkipsMissingFactors(t *testing.T) {
+	base := marketemotion.IntradaySnapshot{
+		RiskScore: 20,
+		Metrics: marketemotion.IntradayMetrics{
+			LimitUpCount:              30,
+			BoardCount:                8,
+			CurrentMaxStreak:          3,
+			PreviousMaxStreak:         3,
+			PreviousLimitUpReturn:     1,
+			PreviousLimitUpQuoteCount: 12,
+			HighAverageReturn:         0.5,
+			HighQuoteCount:            5,
+			HighDownRate:              0.2,
+		},
+	}
+	withoutPools := applyIntradayPools(base, marketEmotionSidePools{}, false)
+	if !withoutPools.ScoreAvailable || withoutPools.Metrics.PoolAvailable || withoutPools.Metrics.BrokenCount != 0 {
+		t.Fatalf("missing pools should not be written as zero: %+v", withoutPools)
+	}
+	withPools := applyIntradayPools(base, marketEmotionSidePools{
+		broken: make([]foundation.MarketLimitEvent, 17),
+		down:   make([]foundation.MarketLimitEvent, 6),
+	}, true)
+	if !withPools.ScoreAvailable || !withPools.Metrics.PoolAvailable {
+		t.Fatalf("expected a score with pools: %+v", withPools)
+	}
+	if withPools.Metrics.BrokenCount != 17 || withPools.Metrics.LimitDownCount != 6 || withPools.SealRate <= 0.6 {
+		t.Fatalf("pool inputs not applied: %+v", withPools)
+	}
+	if withPools.Scores.Heat == withoutPools.Scores.Heat {
+		t.Fatalf("seal/limit-down factors should change heat: %+v vs %+v", withPools.Scores, withoutPools.Scores)
+	}
+}
