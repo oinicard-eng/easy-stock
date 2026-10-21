@@ -154,6 +154,14 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 
 	builder.WriteString("## 二、账户状态\n")
 	fmt.Fprintf(&builder, "- 时间：%s（北京时间）\n", input.Now.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04"))
+	// 盘后/盘前生成的计划，看到的是收盘价，但模型很容易把它当"现价"来做判断。
+	// 10-20 晚上 20:55 生成的计划就是这样：按昨收价算浮亏、按昨收价挂限价，
+	// 第二天开盘全部低开，模型立刻清仓。把时段说清楚比让它自己猜要省一次亏损。
+	if !isTradingSession(input.Now) {
+		builder.WriteString("- 时段：**非连续竞价时段**（盘前 / 午休 / 盘后）。上面的价格是最近一次成交价或收盘价，不是可成交价。\n")
+		builder.WriteString("  据此判断\"现价\"会出错：成交要等到下一个 9:30-11:30 或 13:00-15:00，届时价格可能已经完全不同。\n")
+		builder.WriteString("  这个时段的正确用法是准备方案（标的、逻辑、风控位），而不是假定自己现在能成交。\n")
+	}
 	fmt.Fprintf(&builder, "- 可用资金：%.2f 元（这是唯一可动用的钱）\n", input.Account.AvailableCash())
 	if input.Account.ReservedCash > 0 {
 		fmt.Fprintf(&builder, "- 其中 %.2f 元已被未成交的买入挂单冻结，不得重复计入可用资金\n", input.Account.ReservedCash)

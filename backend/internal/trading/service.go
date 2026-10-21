@@ -27,7 +27,19 @@ var (
 	ErrKillSwitch = errors.New("账户已触发全部停止（kill switch），不生成计划也不允许成交")
 	// ErrPauseBuying 表示只暂停新增买入，卖出与减仓仍然放行。
 	ErrPauseBuying = errors.New("账户已暂停买入，仅允许卖出与减仓")
+	// ErrMarketClosed 表示当前不在连续竞价时段，拒绝撮合。
+	//
+	// 这条规则的代价是真金白银换来的：2026-10-20 晚上 21:35 有一批委托被
+	// "成交"了，撮合用的是当日收盘价。第二天开盘这些标的普遍低开 4% 左右，
+	// 模型看到浮亏就清仓，9 笔合计亏 1,157.67 元——而那个亏损在现实里
+	// 根本不会发生，因为 A 股收市后不可能成交。模拟盘不在时段内撮合，
+	// 等于用一条现实中不存在的路径训练模型，还让账本记住了假亏损。
+	ErrMarketClosed = errors.New("当前不在交易时段（9:30-11:30 / 13:00-15:00），不撮合成交")
 )
+
+// UsageModuleTrading 是 AI交易员在用量面板里的模块名。
+// 它必须和前端展示的模块清单一致，否则花费还是会被算进"其他"。
+const UsageModuleTrading = "trading"
 
 // QuoteProvider 与 httpapi 的实时行情接口保持一致。
 type QuoteProvider interface {
@@ -118,6 +130,19 @@ type Service struct {
 	// 而防守线每 15 秒看一次盘——不缓存的话，一次循环就会为每只持仓拉一遍日线。
 	atrMu    sync.Mutex
 	atrCache map[string]atrProfile
+
+	// now 只服务于"当前是否处于交易时段"这一处判断。
+	// 撮合必须发生在连续竞价时段内，而单测不可能等到真的开盘；
+	// 其余时间逻辑仍然走 time.Now()，不把时钟抽象扩散到全代码。
+	now func() time.Time
+}
+
+// clock 返回判断交易时段用的当前时间。
+func (s *Service) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 func NewService(store *Store, gateway agent.Gateway, quotes QuoteProvider, catalog StockCatalogProvider, logger *log.Logger) *Service {
@@ -130,6 +155,7 @@ func NewService(store *Store, gateway agent.Gateway, quotes QuoteProvider, catal
 		rules:     DefaultRiskRules(),
 		logger:    logger,
 		startedAt: time.Now(),
+		now:       time.Now,
 	}
 	// 默认开启调研：这是"智能体"与"一次性文本生成"的分界线。
 	service.researchEnabled.Store(true)
@@ -510,6 +536,9 @@ type planRun struct {
 // generatePlan 是计划生成的全部流程：取快照 → 构建提示词 → 调模型 → 裁决 → 落库。
 // 返回的 error 与 plan.ErrorMessage 一致，调用方据此决定这一轮循环是否算失败。
 func (s *Service) generatePlan(ctx context.Context, planID, accountID string, watchlist []string, autoUniverse bool, request PlanRequest, run planRun) (Plan, error) {
+	// 用量必须归属到"AI交易员"：不打标签时所有调用都落进 other，
+	// 面板上看到的是"其他模块花了多少钱"，无法回答"这个交易员一天烧多少"。
+	ctx = agent.WithUsageModule(ctx, UsageModuleTrading)
 	plan, err := s.store.GetPlan(ctx, planID)
 	if err != nil {
 		return Plan{}, fmt.Errorf("读取计划失败：%w", err)
@@ -881,6 +910,11 @@ func (s *Service) Execute(ctx context.Context, planID string) (Plan, error) {
 	if plan.Status != PlanStatusDraft {
 		return Plan{}, ErrPlanNotDraft
 	}
+	// 手工执行同样受时段约束：盘后点"执行"只能拿到收盘价成交，
+	// 第二天开盘就是一笔凭空产生的浮亏——10-20 晚上那 9 笔就是这么来的。
+	if !isTradingSession(s.clock()) {
+		return Plan{}, ErrMarketClosed
+	}
 	control, err := s.store.GetControl(ctx, plan.AccountID)
 	if err != nil {
 		return Plan{}, err
@@ -996,6 +1030,12 @@ func (s *Service) match(ctx context.Context, account Account, position Position,
 	}
 	if s.quotes == nil {
 		return order, errors.New("行情服务未配置")
+	}
+	// 第二层防线：MatchPending 会被手动刷新与事件通道直接调用，
+	// 它们不经过 Execute 的时段检查。休市时这里必须原样返回挂起，
+	// 否则"取最新价"取到的是收盘价，撮合就变成了收盘价成交。
+	if !isTradingSession(s.clock()) {
+		return order, nil
 	}
 	// 已有通道单号的委托不再重新提交：那会在券商侧变成第二笔委托。
 	// 它的状态只能靠对账拿回来——这是实盘通道与模拟盘最本质的区别，

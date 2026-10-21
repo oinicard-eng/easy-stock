@@ -6,6 +6,10 @@ type UsagePeriod = 'day' | 'month';
 
 const moduleLabels: Record<string, string> = {
 	'ai-chat': 'AI 对话',
+	// AI交易员的调用以前没有打模块名，全部落进"未归类"，
+	// 于是面板上根本看不出"这个交易员一天烧多少"。现在它独立成行。
+	'trading': 'AI交易员',
+	'cockpit-patrol': 'AI总控台巡检',
 	'stock-analysis': '个股分析',
 	'portfolio-inspection': '持仓 AI 巡检',
 	'review-diary': '大V复盘日记',

@@ -161,6 +161,8 @@ func (s *Store) ListResearchSteps(ctx context.Context, planID string) ([]Researc
 // 用局部变量 + 匿名返回值时，defer 改的是副本，耗时永远是 0——
 // 这个字段本来用来判断"调研会不会拖慢交易时段"，恒为 0 等于没有这个指标。
 func (s *Service) runResearch(ctx context.Context, in ResearchInput) (result ResearchResult) {
+	// 调研是单轮里最贵的一段（4 次调用），同样要归到交易员名下。
+	ctx = agent.WithUsageModule(ctx, UsageModuleTrading)
 	started := time.Now()
 	if !s.researchEnabled.Load() {
 		return ResearchResult{Enabled: false, Steps: []ResearchStep{}, Note: "本轮未启用调研"}

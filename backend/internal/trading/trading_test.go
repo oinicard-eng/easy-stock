@@ -31,9 +31,15 @@ func (f fakeQuotes) Realtime(_ context.Context, symbols []string) ([]foundation.
 type fakeGateway struct {
 	content string
 	err     error
+	// modules 记录每次调用时上下文里的用量模块。
+	// 有了它，"这轮花费算在 AI交易员名下"才是可验证的，而不是靠读代码相信。
+	modules *[]string
 }
 
-func (f fakeGateway) Prompt(context.Context, string) (agent.PromptResult, error) {
+func (f fakeGateway) Prompt(ctx context.Context, _ string) (agent.PromptResult, error) {
+	if f.modules != nil {
+		*f.modules = append(*f.modules, agent.UsageModule(ctx))
+	}
 	return agent.PromptResult{Content: f.content}, f.err
 }
 func (f fakeGateway) Status() agent.Status { return agent.Status{Available: true} }
@@ -210,6 +216,9 @@ func newTestService(t *testing.T, content string, quotes map[string]foundation.Q
 	t.Cleanup(func() { _ = store.Close() })
 	logger := log.New(io.Discard, "", 0)
 	service := NewService(store, fakeGateway{content: content}, fakeQuotes{quotes: quotes}, nil, logger)
+	// 撮合只在连续竞价时段内进行，而单测不可能等到真的开盘：
+	// 把时钟固定在 2026-10-21（周三，交易日）10:00。
+	service.now = func() time.Time { return testSessionTime() }
 	// 计划流程用例不测调研：关掉后仍是"一次模型往返 → 一份计划"的原有语义。
 	service.SetResearchEnabled(false)
 	return service
@@ -361,4 +370,10 @@ func TestRejectedOrdersKeepIntendedQuantity(t *testing.T) {
 	if len(verdicts) == 0 {
 		t.Fatal("应留下拦截原因，否则事后无法判断拦得对不对")
 	}
+}
+
+// testSessionTime 返回一个固定的交易时段时刻（周三 10:00，北京时间）。
+// 撮合规则依赖它，而真实时钟在午休与盘后会正确地拒绝成交。
+func testSessionTime() time.Time {
+	return time.Date(2026, 10, 21, 10, 0, 0, 0, time.FixedZone("CST", 8*3600))
 }

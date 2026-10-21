@@ -259,6 +259,7 @@ func TestPauseBuyingKeepsBuysPendingButAllowsSell(t *testing.T) {
 		"600000.SH": testQuote("600000.SH", "浦发银行", 10, 9.9),
 	}}
 	service := NewService(store, fakeGateway{}, quotes, nil, nil)
+	service.now = func() time.Time { return testSessionTime() }
 
 	// 先建立可卖持仓：买入成交后手工放开 T+1 限制。
 	stored, err := store.CreateOrders(ctx, []Order{testBuyOrder("600000.SH", 1000, 10)})
