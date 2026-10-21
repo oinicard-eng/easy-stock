@@ -147,9 +147,12 @@ func Build(entries []foundation.StockCatalogEntry, market cognition.MarketView, 
 	}
 
 	board := Board{
-		TakenAt:     time.Now().UTC(),
+		TakenAt: time.Now().UTC(),
 		SourceCount: len(entries),
 		Market:      market,
+		// 无候选也要是空数组而不是 null：前端会对 candidates.length 取值，
+		// JSON null 会在浏览器里变成一整页白屏（2026-10-21 实测事故）。
+		Candidates: []Candidate{},
 	}
 	if !market.Regime.Valid() {
 		board.Exclusions = []Exclusion{{Reason: "市场状态为「" + market.Label + "」，本轮不开新仓", Count: len(entries)}}

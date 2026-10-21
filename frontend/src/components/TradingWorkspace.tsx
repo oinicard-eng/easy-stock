@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import type { BackendConfig } from '../lib/backend';
+import { PanelErrorBoundary } from './PanelErrorBoundary';
 import {
 	availableCash,
 	cancelTradeOrder,
@@ -225,13 +226,16 @@ function UniversePanel({
 			</div>
 		);
 	}
+	// 后端在「无候选」时可能返回 null（历史接口行为），这里必须兜底，
+	// 否则一次 .length 就把整页炸成白屏。
+	const candidates = board.candidates ?? [];
 	const total = board.exclusions?.reduce((sum, item) => sum + item.count, 0) ?? 0;
 	return (
 		<div className="trading-universe">
 			<div className="trading-universe-head">
 				<div>
 					<strong>
-						<Target size={16} /> 候选池 {board.candidates.length} 只
+						<Target size={16} /> 候选池 {candidates.length} 只
 					</strong>
 					<span>
 						从全市场 {board.source_count} 只中确定性筛出，成交额门槛 {(board.threshold_amount / 1e4).toFixed(0)} 万元
@@ -243,7 +247,7 @@ function UniversePanel({
 					{loading ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />} 重扫
 				</button>
 			</div>
-			{board.candidates.length === 0 ? (
+			{candidates.length === 0 ? (
 				<p className="trading-universe-empty">
 					本轮没有候选：{(board.exclusions ?? [])[0]?.reason ?? '全市场没有满足条件的标的'}
 				</p>
@@ -263,7 +267,7 @@ function UniversePanel({
 								</tr>
 							</thead>
 							<tbody>
-								{board.candidates.map((candidate) => (
+								{candidates.map((candidate) => (
 									<tr key={candidate.symbol}>
 										<td>{candidate.rank}</td>
 										<td>
@@ -289,7 +293,7 @@ function UniversePanel({
 							<ChevronDown size={13} /> 每只标的的入选依据
 						</summary>
 						<ul className="trading-reason-list">
-							{board.candidates.map((candidate) => (
+							{candidates.map((candidate) => (
 								<li key={candidate.symbol}>
 									<strong>
 										{candidate.symbol} {candidate.name}
@@ -578,7 +582,18 @@ function DecisionPanel({ plan }: { plan: TradePlan }) {
 	);
 }
 
-export function TradingWorkspace({ config, onOpenSettings }: Props) {
+// 交易工作台是整个页面最重的模块：任何一个面板的渲染异常都不该把
+// 整页炸成白屏（2026-10-21 UniversePanel 读 null.length 造成过一次）。
+// 内层是真正的实现，外层边界兜住一切渲染异常，只替换自己。
+export function TradingWorkspace(props: Props) {
+	return (
+		<PanelErrorBoundary title="交易工作台">
+			<TradingWorkspaceInner {...props} />
+		</PanelErrorBoundary>
+	);
+}
+
+function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 	const [account, setAccount] = useState<TradeAccountView | null>(null);
 	const [plans, setPlans] = useState<TradePlan[]>([]);
 	const [active, setActive] = useState<TradePlan | null>(null);
@@ -1284,7 +1299,7 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 				<article>
 					<span>持仓市值</span>
 					<strong>{account ? `¥ ${formatMoney(account.account.market_value)}` : '—'}</strong>
-					<em>{account?.positions.length ?? 0} 只标的</em>
+					<em>{account?.positions?.length ?? 0} 只标的</em>
 				</article>
 				<article>
 					<span>浮动盈亏</span>
@@ -1450,7 +1465,7 @@ export function TradingWorkspace({ config, onOpenSettings }: Props) {
 							<tr><th>标的</th><th>数量</th><th>可卖 / 冻结</th><th>成本</th><th>现价</th><th>浮动盈亏</th><th>防守线</th><th>操作</th></tr>
 						</thead>
 						<tbody>
-							{(!account || account.positions.length === 0) && (
+							{(!account || (account.positions ?? []).length === 0) && (
 								<tr><td colSpan={8} className="trading-empty-cell">当前空仓</td></tr>
 							)}
 							{account?.positions.map((position) => {
@@ -2286,12 +2301,12 @@ function CycleReplay({ config, planId }: { config: BackendConfig; planId: string
 			</div>
 			<div className="trading-replay-section">
 				<h3>② 候选池</h3>
-				{board && board.candidates.length > 0 ? (
+				{board && (board.candidates ?? []).length > 0 ? (
 					<p>
-						共 {board.candidates.length} 只（源 {board.source_count} 只
+						共 {(board.candidates ?? []).length} 只（源 {board.source_count} 只
 						{board.degraded ? '，当日缩量已下调门槛' : ''}）：{' '}
-						{board.candidates.slice(0, 5).map((candidate) => `${candidate.name}(${candidate.score.toFixed(0)})`).join('、')}
-						{board.candidates.length > 5 ? ' …' : ''}
+						{(board.candidates ?? []).slice(0, 5).map((candidate) => `${candidate.name}(${candidate.score.toFixed(0)})`).join('、')}
+						{(board.candidates ?? []).length > 5 ? ' …' : ''}
 					</p>
 				) : (
 					<p>本轮未做全市场筛选（标的由人工指定）。</p>
