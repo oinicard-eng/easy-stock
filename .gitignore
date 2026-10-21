@@ -29,6 +29,7 @@ __pycache__/
 *.pyc
 node_modules/
 frontend/dist/
+frontend/dist-trading/
 frontend/*.tsbuildinfo
 desktop/bin/
 desktop/resources/
