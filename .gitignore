@@ -39,6 +39,9 @@ backend/bin/
 # go build 在包目录直出的产物（守护脚本实际用的是 backend/bin 下那份）
 backend/server.exe
 backend/server
+# cmd/replay 直出在同一目录，同样是产物而非源码
+backend/replay.exe
+backend/replay
 # BigAMap raw responses archived by cmd/theme-library-import; the curated snapshot
 # lives in backend/internal/themelibrary/seed.json and is embedded into the binary.
 backend/data/theme-library/raw/
