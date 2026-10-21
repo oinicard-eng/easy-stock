@@ -46,9 +46,27 @@ type DrawdownPolicy struct {
 	ReleasePercent float64 `json:"release_percent"`
 }
 
-// DefaultDrawdownPolicy 返回基准阈值。
+// DefaultDrawdownPolicy 返回基准阈值（均衡风格）。
 func DefaultDrawdownPolicy() DrawdownPolicy {
 	return DrawdownPolicy{WarnPercent: 8, StopPercent: 12, ReleasePercent: 5}
+}
+
+// DrawdownPolicyForProfile 按交易风格给出回撤熔断阈值。
+//
+// 同一套阈值对不同风格是不公平的比较：激进账户的常态波动更大，
+// 用均衡的警戒线会在正常波动里频繁熔断；反过来，稳健账户用激进的
+// 阈值就失去了它要的"早停"。三档只调"能忍受多深的回撤"，
+// 解除线始终取警戒线的一半左右（滞回形状不变），风格之间可比。
+// 与 RulesForProfile 同构：同一个风格名，额度与熔断是配套的一套。
+func DrawdownPolicyForProfile(profile string) DrawdownPolicy {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "aggressive", "激进":
+		return DrawdownPolicy{WarnPercent: 12, StopPercent: 18, ReleasePercent: 6}
+	case "steady", "稳健":
+		return DrawdownPolicy{WarnPercent: 5, StopPercent: 8, ReleasePercent: 2.5}
+	default:
+		return DefaultDrawdownPolicy()
+	}
 }
 
 // Normalize 修正非法配置：停止线必须高于警戒线，警戒线必须高于解除线。
@@ -142,7 +160,11 @@ func hasDrawdownReason(reason string) bool {
 // 调用点有两处：每轮循环开始（用当前权益）与结束（用成交后的权益）。
 // 只在一处调用会漏掉两种情况——开盘就跳空低开（还没成交就已经回撤），
 // 以及盘中成交后净值跌破新低（要等下一轮才被发现）。
-func (s *Service) ObserveEquity(ctx context.Context, accountID string, equity float64, now time.Time) (RiskState, error) {
+//
+// profile 决定熔断阈值（DrawdownPolicyForProfile）：阈值跟着当前交易风格走，
+// 而不是跟着历史落库值走——风格是使用者现在选的，风险容忍度就该现在生效。
+// 已触发的 stop 档不受影响：它仍只能人工解除，换一个宽松的风格不会自动解封。
+func (s *Service) ObserveEquity(ctx context.Context, accountID string, equity float64, now time.Time, profile string) (RiskState, error) {
 	accountID = s.accountID(accountID)
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -151,7 +173,7 @@ func (s *Service) ObserveEquity(ctx context.Context, accountID string, equity fl
 	if err != nil {
 		return RiskState{}, err
 	}
-	policy := state.Policy.Normalize()
+	policy := DrawdownPolicyForProfile(profile).Normalize()
 	previous := state.Level
 
 	// 首次观察时把初始资金也当作高点：账户从 10 万亏到 9.2 万，

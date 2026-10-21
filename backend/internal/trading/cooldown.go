@@ -26,8 +26,9 @@ import (
 
 // CooldownRule 是冷静期的参数。
 type CooldownRule struct {
-	// SymbolHours 是同一标的止损后的禁买时长。
-	// 4 小时覆盖一个完整交易日的剩余时段：上午止损的票，当天不会再被买回。
+	// SymbolHours 是同一标的止损后的禁买时长，按**交易时段时间**累计
+	// （午休、隔夜、周末不计）。4 小时交易时间覆盖一个交易日的剩余时段
+	// 有余：上午止损的票当天不会再被买回，下午尾盘止损的顺延到次日开盘起算。
 	SymbolHours float64
 	// SectorLossesPerDay 是同一行业当日止损次数上限。达到即当日禁买该行业。
 	SectorLossesPerDay int
@@ -117,7 +118,9 @@ func (s *Store) BuildCooldowns(ctx context.Context, accountID string, rule Coold
 			continue
 		}
 		// 标的级：只取最近一次，窗口内即禁买。
-		until := trade.ClosedAt.Add(time.Duration(rule.SymbolHours * float64(time.Hour)))
+		// 窗口按交易时段时间累计：午休、隔夜与周末不计入，
+		// 否则"4 小时"在跨午休时实际只冷却约 3 小时。
+		until := addTradingHours(trade.ClosedAt, rule.SymbolHours)
 		if now.Before(until) {
 			if existing, ok := view.Symbols[trade.Symbol]; !ok || existing.Until.Before(until) {
 				view.Symbols[trade.Symbol] = Cooldown{
@@ -165,6 +168,68 @@ func (s *Store) BuildCooldowns(ctx context.Context, accountID string, rule Coold
 func sessionCloseOf(now time.Time) time.Time {
 	local := now.In(cstZone())
 	return time.Date(local.Year(), local.Month(), local.Day(), 15, 0, 0, 0, cstZone())
+}
+
+// tradingSessionsOn 返回某日的 A 股交易时段（北京时间）：9:30–11:30 与 13:00–15:00。
+func tradingSessionsOn(day time.Time) [][2]time.Time {
+	local := day.In(cstZone())
+	y, m, d := local.Date()
+	at := func(h, min int) time.Time { return time.Date(y, m, d, h, min, 0, 0, cstZone()) }
+	return [][2]time.Time{{at(9, 30), at(11, 30)}, {at(13, 0), at(15, 0)}}
+}
+
+// nextTradingDayOpen 返回 from 之后的下一个交易日开盘（跳过周末）。
+// 没有交易日历，法定节假日无法识别——这是已知取舍：节假日会被当作
+// 交易日计入窗口，方向是让解禁略早；宁可轻微提前解禁，也不引入
+// 一张需要人工维护的节假日表。
+func nextTradingDayOpen(from time.Time) time.Time {
+	day := from.In(cstZone())
+	for i := 0; i < 7; i++ {
+		day = day.AddDate(0, 0, 1)
+		if wd := day.Weekday(); wd != time.Saturday && wd != time.Sunday {
+			return tradingSessionsOn(day)[0][0]
+		}
+	}
+	return from.Add(24 * time.Hour)
+}
+
+// addTradingHours 从 from 起累加 hours 小时的**交易时段时间**，返回到期时刻。
+//
+// 冷静期窗口此前按自然时间算：上午 11:20 止损要到 15:20 才解禁，但其中
+// 11:30–13:00 是午休——实际只冷却了 3.5 小时交易时间，且解禁时点落在
+// 收盘之后，"当天解禁"形同虚设。改为按交易时段推进：非交易时段
+// （午休、隔夜、周末）不计入窗口。
+//
+// 落在非交易时段的起点从下一个时段开盘开始累计；收盘前的余量不足时
+// 顺延到下一个交易日的开盘继续。推进步数有上限，异常输入按自然时间
+// 收口（宁可多冷却，不提前解禁）。
+func addTradingHours(from time.Time, hours float64) time.Time {
+	remaining := time.Duration(hours * float64(time.Hour))
+	if remaining <= 0 {
+		return from
+	}
+	cursor := from.In(cstZone())
+	for i := 0; i < 10 && remaining > 0; i++ {
+		if wd := cursor.Weekday(); wd == time.Saturday || wd == time.Sunday {
+			cursor = nextTradingDayOpen(cursor)
+			continue
+		}
+		for _, session := range tradingSessionsOn(cursor) {
+			start := cursor
+			if start.Before(session[0]) {
+				start = session[0]
+			}
+			if !start.Before(session[1]) {
+				continue
+			}
+			if remaining <= session[1].Sub(start) {
+				return start.Add(remaining)
+			}
+			remaining -= session[1].Sub(start)
+		}
+		cursor = nextTradingDayOpen(cursor)
+	}
+	return from.Add(time.Duration(hours * float64(time.Hour)))
 }
 
 // Cooldowns 是服务层入口，供计划生成时把约束塞进快照。

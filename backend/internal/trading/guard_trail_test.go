@@ -41,17 +41,17 @@ func TestEvaluatePositionTrailRespectsVolatility(t *testing.T) {
 	config := DefaultGuardConfig()
 
 	// 无 ATR：沿用 4%/6%，回撤 6.67% 触发。
-	if trigger, _, _ := evaluatePosition(position, 11.2, 3, 0, rules, config); trigger != TriggerTrailStop {
+	if trigger, _, _ := evaluatePosition(position, 11.2, 3, 0, rules, config, nil); trigger != TriggerTrailStop {
 		t.Fatalf("没有波动率数据时应按 4%%/6%% 判定并触发，实际 %s", trigger)
 	}
 
 	// 高波动（5%）：宽度 12%，同样的回撤不该离场。
-	if trigger, _, _ := evaluatePosition(position, 11.2, 3, 5, rules, config); trigger != TriggerNoTrigger {
+	if trigger, _, _ := evaluatePosition(position, 11.2, 3, 5, rules, config, nil); trigger != TriggerNoTrigger {
 		t.Fatalf("ATR 5%% 的票在 -6.67%% 回撤时不应触发移动止损，实际 %s", trigger)
 	}
 
 	// 低波动（1%）：宽度 3%，同样回撤必然触发。
-	trigger, fraction, verdict := evaluatePosition(position, 11.2, 3, 1, rules, config)
+	trigger, fraction, verdict := evaluatePosition(position, 11.2, 3, 1, rules, config, nil)
 	if trigger != TriggerTrailStop {
 		t.Fatalf("ATR 1%% 的票在 -6.67%% 回撤时应触发，实际 %s", trigger)
 	}
@@ -72,7 +72,7 @@ func TestEvaluatePositionTrailNeedsArm(t *testing.T) {
 	}
 	// 现价 10.1：浮盈 1%，峰值 10.5，回撤 3.8%。门槛 2%（ATR 1%）→ 已启动；
 	// 门槛 4%（无 ATR）→ 未启动，不该触发。
-	if trigger, _, _ := evaluatePosition(position, 10.1, 1, 0, DefaultRiskRules(), DefaultGuardConfig()); trigger == TriggerTrailStop {
+	if trigger, _, _ := evaluatePosition(position, 10.1, 1, 0, DefaultRiskRules(), DefaultGuardConfig(), nil); trigger == TriggerTrailStop {
 		t.Fatalf("浮盈 1%% 未达 4%% 门槛时不应触发移动止损")
 	}
 }

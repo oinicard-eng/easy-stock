@@ -17,7 +17,7 @@ func TestDrawdownWarnPausesBuying(t *testing.T) {
 
 	// 第一次观察没有任何历史：高点必须取"权益与初始资金中的较大者"，
 	// 否则从 10 万亏到 9.2 万的账户回撤会显示 0%。
-	state, err := service.ObserveEquity(ctx, DefaultAccountID, 100000, now)
+	state, err := service.ObserveEquity(ctx, DefaultAccountID, 100000, now, "balanced")
 	if err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
@@ -25,7 +25,7 @@ func TestDrawdownWarnPausesBuying(t *testing.T) {
 		t.Fatalf("初始状态异常：%+v", state)
 	}
 
-	state, err = service.ObserveEquity(ctx, DefaultAccountID, 91000, now.Add(time.Minute))
+	state, err = service.ObserveEquity(ctx, DefaultAccountID, 91000, now.Add(time.Minute), "balanced")
 	if err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
@@ -51,10 +51,10 @@ func TestDrawdownPeakNeverLowersOnFall(t *testing.T) {
 	service := newTestService(t, "", nil)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 120000, now); err != nil {
+	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 120000, now, "balanced"); err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
-	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 98000, now.Add(time.Minute)); err != nil {
+	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 98000, now.Add(time.Minute), "balanced"); err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
 	state, err := service.store.GetRiskState(ctx, DefaultAccountID)
@@ -73,10 +73,10 @@ func TestDrawdownStopNeedsManualReleaseAndResetsPeak(t *testing.T) {
 	service := newTestService(t, "", nil)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 100000, now); err != nil {
+	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 100000, now, "balanced"); err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
-	state, err := service.ObserveEquity(ctx, DefaultAccountID, 87000, now.Add(time.Minute))
+	state, err := service.ObserveEquity(ctx, DefaultAccountID, 87000, now.Add(time.Minute), "balanced")
 	if err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
@@ -84,7 +84,7 @@ func TestDrawdownStopNeedsManualReleaseAndResetsPeak(t *testing.T) {
 		t.Fatalf("13%% 回撤应触发停止线，实际 %s", state.Level)
 	}
 	// 反弹 2 个百分点不足以自动解除：能弹回来的账户也常常会再跌回去。
-	state, err = service.ObserveEquity(ctx, DefaultAccountID, 89000, now.Add(2*time.Minute))
+	state, err = service.ObserveEquity(ctx, DefaultAccountID, 89000, now.Add(2*time.Minute), "balanced")
 	if err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
@@ -110,7 +110,7 @@ func TestDrawdownStopNeedsManualReleaseAndResetsPeak(t *testing.T) {
 		t.Fatal("解除后应恢复买入")
 	}
 	// 解除后立刻再观察一次，不能又弹回停止线——那样解除按钮就没有意义。
-	state, err = service.ObserveEquity(ctx, DefaultAccountID, released.Equity, now.Add(3*time.Minute))
+	state, err = service.ObserveEquity(ctx, DefaultAccountID, released.Equity, now.Add(3*time.Minute), "balanced")
 	if err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
@@ -123,21 +123,21 @@ func TestDrawdownRecoversOnlyBelowReleaseLine(t *testing.T) {
 	service := newTestService(t, "", nil)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 100000, now); err != nil {
+	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 100000, now, "balanced"); err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
-	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 91000, now.Add(time.Minute)); err != nil {
+	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 91000, now.Add(time.Minute), "balanced"); err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
 	// 6.5% 落在 5% 解除线与 8% 警戒线之间：必须维持警戒，不能来回抖动。
-	state, err := service.ObserveEquity(ctx, DefaultAccountID, 93500, now.Add(2*time.Minute))
+	state, err := service.ObserveEquity(ctx, DefaultAccountID, 93500, now.Add(2*time.Minute), "balanced")
 	if err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
 	if state.Level != DrawdownLevelWarn {
 		t.Fatalf("6.5%% 应维持警戒（滞回），实际 %s", state.Level)
 	}
-	state, err = service.ObserveEquity(ctx, DefaultAccountID, 96000, now.Add(3*time.Minute))
+	state, err = service.ObserveEquity(ctx, DefaultAccountID, 96000, now.Add(3*time.Minute), "balanced")
 	if err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
@@ -163,10 +163,10 @@ func TestDrawdownDoesNotClearForeignPause(t *testing.T) {
 		t.Fatalf("设置总闸失败：%v", err)
 	}
 	now := time.Now().UTC()
-	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 105000, now); err != nil {
+	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 105000, now, "balanced"); err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
-	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 95000, now.Add(time.Minute)); err != nil {
+	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 95000, now.Add(time.Minute), "balanced"); err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
 	control, err := service.Control(ctx, DefaultAccountID)
@@ -177,7 +177,7 @@ func TestDrawdownDoesNotClearForeignPause(t *testing.T) {
 		t.Fatalf("不应覆盖别人的暂停理由：%+v", control)
 	}
 	// 回撤恢复后同样不能清掉别人的暂停。
-	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 105000, now.Add(2*time.Minute)); err != nil {
+	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 105000, now.Add(2*time.Minute), "balanced"); err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
 	control, err = service.Control(ctx, DefaultAccountID)
@@ -192,7 +192,7 @@ func TestDrawdownDoesNotClearForeignPause(t *testing.T) {
 func TestRiskStatePersistsAcrossReads(t *testing.T) {
 	service := newTestService(t, "", nil)
 	ctx := context.Background()
-	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 100000, time.Now().UTC()); err != nil {
+	if _, err := service.ObserveEquity(ctx, DefaultAccountID, 100000, time.Now().UTC(), "balanced"); err != nil {
 		t.Fatalf("观察权益失败：%v", err)
 	}
 	state, control, err := service.RiskView(ctx, DefaultAccountID)
@@ -218,5 +218,32 @@ func TestDrawdownPolicyNormalizeFixesInvertedThresholds(t *testing.T) {
 	}
 	if level, _ := policy.Assess(DrawdownLevelNone, 0, 100000); level != DrawdownLevelNone {
 		t.Fatalf("无高点时不应触发：%s", level)
+	}
+}
+
+func TestDrawdownPolicyFollowsProfile(t *testing.T) {
+	// 同样从 10 万回撤到 9.05 万（-9.5%）：
+	// 均衡档 8/12 → 警戒；激进档 12/18 → 正常；稳健档 5/8 → 停止。
+	for profile, wantLevel := range map[string]string{
+		"balanced":   DrawdownLevelWarn,
+		"aggressive": "",
+		"steady":     DrawdownLevelStop,
+	} {
+		profile, wantLevel := profile, wantLevel
+		t.Run(profile, func(t *testing.T) {
+			service := newTestService(t, `{"orders":[]}`, nil)
+			ctx := context.Background()
+			now := time.Now().UTC()
+			if _, err := service.ObserveEquity(ctx, DefaultAccountID, 100000, now, profile); err != nil {
+				t.Fatalf("首次观察失败：%v", err)
+			}
+			state, err := service.ObserveEquity(ctx, DefaultAccountID, 90500, now.Add(time.Minute), profile)
+			if err != nil {
+				t.Fatalf("回撤观察失败：%v", err)
+			}
+			if state.Level != wantLevel {
+				t.Fatalf("%s 档在回撤 9.5%% 时档位应为 %q，实际 %q", profile, wantLevel, state.Level)
+			}
+		})
 	}
 }

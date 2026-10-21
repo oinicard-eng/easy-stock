@@ -409,7 +409,7 @@ func BuildPlanPrompt(input PlanPromptInput) string {
 	builder.WriteString("\ninvalidation 的字段会被系统按下面的方式执行，请按此设计：\n")
 	builder.WriteString("- price_below：现价跌破该价即视为判断失效，系统自动卖出该仓位一半（不清仓，剩下的交止损）。\n")
 	builder.WriteString("- deadline_days：持有超过该交易日数仍未盈利，系统自动减仓一半；若届时为亏损则清仓。\n")
-	builder.WriteString("- sector_flow：只作为文字记录，系统无法自动判定板块资金，请勿把它当作唯一失效条件。\n")
+	builder.WriteString("- sector_flow：写明板块名（如 \"半导体 转为净流出\"），守卫会按主力净占比 ≤ -1% 自动判定并减仓；数据缺失时该条件本轮不判定。\n")
 	builder.WriteString("- note：写给人看，系统不解析。\n")
 	builder.WriteString("失效条件与止损的分工：止损是「价格到线」，失效是「逻辑不成立」。不要用失效条件替代止损，也不要写成同一个价位。\n")
 	builder.WriteString("expected_days 是预期兑现天数（交易日），用于时间止损；不给则按计划周期推断。\n")

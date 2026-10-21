@@ -17,6 +17,7 @@ package trading
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -120,9 +121,19 @@ func (a *Autopilot) eventTriggered(ctx context.Context, accountID string, now ti
 	a.mu.Lock()
 	baseline := a.watch.equity
 	baselineAt := a.watch.equityAt
+	a.mu.Unlock()
+	if baseline == 0 || baselineAt.IsZero() {
+		// 内存基线为空（含刚重启）：从 KV 恢复一次。停机几秒到几分钟的
+		// 重启由此不丢窗口；停机超过窗口的会被下面的窗口检查自然重置。
+		if eq, at, ok := a.loadEquityBaseline(accountID); ok {
+			baseline, baselineAt = eq, at
+		}
+	}
+	a.mu.Lock()
 	a.watch.equity = account.Equity
 	a.watch.equityAt = now
 	a.mu.Unlock()
+	a.saveEquityBaseline(accountID, account.Equity, now)
 	// 基线为空或已超出窗口时只重置，不判断：没有可比的过去，就没有"跌了多少"。
 	if baseline > 0 && !baselineAt.IsZero() && now.Sub(baselineAt) <= eventPortfolioWindow {
 		if drop := (1 - account.Equity/baseline) * 100; drop >= eventPortfolioDropPercent {
@@ -244,13 +255,21 @@ func (a *Autopilot) sectorFlowNegative(ctx context.Context, account Account, pos
 // 任一维度失败就只用另一个维度的结果：缺一半数据也比完全没有好，
 // 而两个都失败时返回空表，调用方会直接放弃判断。
 func (a *Autopilot) fetchSectorFlow(ctx context.Context, provider SectorFlowProvider) map[string]float64 {
+	return fetchSectorFlowMap(ctx, provider, a.logf)
+}
+
+// fetchSectorFlowMap 是板块资金流取数的公共实现，事件通道与守卫共用：
+// 同一个数据源、同样的容错语义，不允许两处各写一份。
+func fetchSectorFlowMap(ctx context.Context, provider SectorFlowProvider, logf func(string, ...any)) map[string]float64 {
 	flows := make(map[string]float64, eventSectorFlowDimensionLimit*2)
 	for _, dimension := range []string{"industry", "concept"} {
 		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		rows, _, err := provider.SectorFlowRanking(callCtx, dimension, eventSectorFlowDimensionLimit)
 		cancel()
 		if err != nil {
-			a.logf("event=autopilot_sector_flow_failed dimension=%s err=%v", dimension, err)
+			if logf != nil {
+				logf("event=autopilot_sector_flow_failed dimension=%s err=%v", dimension, err)
+			}
 			continue
 		}
 		for _, row := range rows {
@@ -284,6 +303,49 @@ func (a *Autopilot) markEventFired(now time.Time) {
 	defer a.mu.Unlock()
 	a.watch.lastAt = now
 	a.watch.count++
+}
+
+// equityBaselineKey 是组合权益基线在 KV 里的键名，按账户区分。
+func equityBaselineKey(accountID string) string {
+	return "event_equity_baseline:" + accountID
+}
+
+// loadEquityBaseline 从 KV 恢复上一次观察的组合权益。
+// 值格式 "equity|RFC3339Nano"。任何解析失败都按"没有基线"处理。
+func (a *Autopilot) loadEquityBaseline(accountID string) (float64, time.Time, bool) {
+	if a.store == nil {
+		return 0, time.Time{}, false
+	}
+	raw, ok, err := a.store.GetState(context.Background(), equityBaselineKey(accountID))
+	if err != nil || !ok {
+		return 0, time.Time{}, false
+	}
+	parts := strings.SplitN(raw, "|", 2)
+	if len(parts) != 2 {
+		return 0, time.Time{}, false
+	}
+	equity, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil || equity <= 0 {
+		return 0, time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339Nano, parts[1])
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	return equity, at, true
+}
+
+// saveEquityBaseline 把最新观察写入 KV。写失败只记日志：丢了基线的代价
+// 是重启后 15 分钟盲区回归，不是数据错误。
+func (a *Autopilot) saveEquityBaseline(accountID string, equity float64, at time.Time) {
+	if a.store == nil {
+		return
+	}
+	err := a.store.SetState(context.Background(), equityBaselineKey(accountID),
+		fmt.Sprintf("%.2f|%s", equity, at.Format(time.RFC3339Nano)))
+	if err != nil {
+		a.logf("event=equity_baseline_persist_failed err=%v", err)
+	}
 }
 
 // previousCloseOf 取某只标的的昨收。行情结构里的字段在两条路径上命名不同，

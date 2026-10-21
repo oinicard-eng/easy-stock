@@ -41,13 +41,30 @@ func insertClosedTrade(t *testing.T, store *Store, trade ClosedTrade) {
 	}
 }
 
+// cooldownCST 构造一个北京时间时点。冷静期窗口按交易时段算，
+// 测试必须用固定时点：用 time.Now() 的话，测试在盘中、午休、夜里跑
+// 会得到三种不同的解禁时刻，断言无从谈起。
+func cooldownCST(hour, min int, dayOffset int) time.Time {
+	local := time.Now().In(cstZone()).AddDate(0, 0, dayOffset)
+	// 落到周三附近的平日本身，避开周末。
+	for wd := local.Weekday(); wd == time.Saturday || wd == time.Sunday; {
+		local = local.AddDate(0, 0, 1)
+		wd = local.Weekday()
+	}
+	y, m, d := local.Date()
+	return time.Date(y, m, d, hour, min, 0, 0, cstZone())
+}
+
 func TestCooldownBlocksSymbolAfterStopLoss(t *testing.T) {
 	store := newCooldownStore(t)
-	now := time.Now()
+	// 周三 10:00 止损，10:30 判定。4 小时交易时间 = 当日剩余 3.5 小时
+	// （10:00–11:30 + 13:00–15:00）+ 次日开盘后 0.5 小时 → 周四 10:00 解禁。
+	closedAt := cooldownCST(10, 0, 0)
+	now := cooldownCST(10, 30, 0)
 	insertClosedTrade(t, store, ClosedTrade{
 		AccountID: DefaultAccountID, Symbol: "600000.SH", Name: "浦发银行", Sector: "银行",
 		Trigger: TriggerStopLoss, PnLPercent: -6.2,
-		TradingDay: TradingDay(now), ClosedAt: now.Add(-1 * time.Hour),
+		TradingDay: TradingDay(closedAt), ClosedAt: closedAt,
 	})
 	view, err := store.BuildCooldowns(context.Background(), DefaultAccountID, DefaultCooldownRule(), now)
 	if err != nil {
@@ -57,8 +74,9 @@ func TestCooldownBlocksSymbolAfterStopLoss(t *testing.T) {
 	if !ok {
 		t.Fatalf("止损后应产生标的级冷静期：%+v", view)
 	}
-	if !cooldown.Until.After(now.Add(2 * time.Hour)) {
-		t.Fatalf("4 小时窗口应覆盖当前时刻之后 2 小时以上，实际至 %s", cooldown.Until)
+	wantUntil := cooldownCST(10, 0, 1)
+	if !cooldown.Until.Equal(wantUntil) {
+		t.Fatalf("解禁时刻应为次日 %s（4 小时交易时间），实际 %s", wantUntil, cooldown.Until)
 	}
 	if verdict, passed := view.Block("600000.SH", "银行", now); passed {
 		t.Fatalf("冷静期内应拦截买入，实际放行：%+v", verdict)
@@ -66,8 +84,56 @@ func TestCooldownBlocksSymbolAfterStopLoss(t *testing.T) {
 		t.Fatalf("拦截码应为 risk.cooldown_symbol，实际 %s", verdict.Code)
 	}
 	// 过了窗口自然解禁：冷静期不是"永久拉黑"。
-	if _, passed := view.Block("600000.SH", "银行", now.Add(5*time.Hour)); !passed {
-		t.Fatal("4 小时后应自动解禁")
+	if _, passed := view.Block("600000.SH", "银行", wantUntil.Add(time.Minute)); !passed {
+		t.Fatal("解禁时刻之后应自动放行")
+	}
+}
+
+func TestCooldownWindowSkipsLunchBreakAndWeekend(t *testing.T) {
+	// 找到下一个星期几的辅助：直接按日期构造（不走 cooldownCST 的跳周末逻辑，
+	// 否则它永远造不出周六）。同时刻取自真实日历的该日，保证是星期几正确。
+	nextWeekday := func(hour, min int, want time.Weekday) time.Time {
+		base := time.Now().In(cstZone())
+		for offset := 0; offset < 8; offset++ {
+			day := base.AddDate(0, 0, offset)
+			if day.Weekday() == want {
+				y, m, d := day.Date()
+				return time.Date(y, m, d, hour, min, 0, 0, cstZone())
+			}
+		}
+		return time.Time{}
+	}
+
+	// 周五 14:30 止损：当日只剩 0.5 小时交易时间，剩余 3.5 小时
+	// 顺延到下周一：开盘 2 小时（上午）+ 午后 1.5 小时 → 周一 14:30 解禁。
+	friday := nextWeekday(14, 30, time.Friday)
+	until := addTradingHours(friday, 4)
+	monday := friday.AddDate(0, 0, 3) // 周五 +3 天即下周一
+	want := time.Date(monday.Year(), monday.Month(), monday.Day(), 14, 30, 0, 0, cstZone())
+	if !until.Equal(want) {
+		t.Fatalf("周五尾盘止损应顺延到下周一 14:30 解禁（跳过周末与午休），实际 %s", until)
+	}
+
+	// 午休起点止损：11:20 止损 → 上午剩 10 分钟 + 下午 2 小时 + 次日 1 小时 50 分 → 次日 11:20。
+	lunch := nextWeekday(11, 20, time.Tuesday)
+	until = addTradingHours(lunch, 4)
+	// 次日若是周末要顺延：直接取 lunch 之后最近的次日同时刻（跳过周末）。
+	nextDay := lunch.AddDate(0, 0, 1)
+	for wd := nextDay.Weekday(); wd == time.Saturday || wd == time.Sunday; {
+		nextDay = nextDay.AddDate(0, 0, 1)
+		wd = nextDay.Weekday()
+	}
+	if !until.Equal(nextDay) {
+		t.Fatalf("午休前止损应跳过午休累计，实际 %s，期望 %s", until, nextDay)
+	}
+
+	// 周末止损：从下周一开盘起算 4 小时交易时间 = 上午 2 小时 + 午后 2 小时 → 周一 15:00（收盘）。
+	saturday := nextWeekday(15, 30, time.Saturday)
+	until = addTradingHours(saturday, 4)
+	wantMonday := saturday.AddDate(0, 0, 2) // 周六 +2 天即下周一
+	want = time.Date(wantMonday.Year(), wantMonday.Month(), wantMonday.Day(), 15, 0, 0, 0, cstZone())
+	if !until.Equal(want) {
+		t.Fatalf("周末止损应从下周一开盘起算，实际 %s，期望 %s", until, want)
 	}
 }
 

@@ -558,7 +558,7 @@ func (a *Autopilot) RunCycle(ctx context.Context, trigger CycleTrigger) (Cycle, 
 	// 日亏每天零点归零，连续阴跌两周的账户永远不会触发它；回撤跨日累计。
 	// 这里只观察、落库、按需按下暂停买入，真正的拦截仍由 control 与裁决层执行——
 	// 同一个判断只留一条执行路径，否则"熔断了但计划还在买"会再次出现。
-	if riskState, riskErr := a.service.ObserveEquity(ctx, accountID, account.Equity, now); riskErr != nil {
+	if riskState, riskErr := a.service.ObserveEquity(ctx, accountID, account.Equity, now, config.TraderProfile); riskErr != nil {
 		cycle.Notes = append(cycle.Notes, fmt.Sprintf("回撤观察失败：%v", riskErr))
 	} else {
 		cycle.DrawdownPercent = riskState.DrawdownPercent
@@ -718,7 +718,7 @@ func (a *Autopilot) RunCycle(ctx context.Context, trigger CycleTrigger) (Cycle, 
 		cycle.Breaker = state.Breaker
 		// 成交后净值可能已经跌出新低：不在这里复核，回撤要到下一轮才被发现，
 		// 而下一轮开始时可能已经又跌了一段。
-		if riskState, riskErr := a.service.ObserveEquity(ctx, accountID, after.Equity, now); riskErr == nil {
+		if riskState, riskErr := a.service.ObserveEquity(ctx, accountID, after.Equity, now, config.TraderProfile); riskErr == nil {
 			cycle.DrawdownPercent = riskState.DrawdownPercent
 		} else {
 			cycle.Notes = append(cycle.Notes, fmt.Sprintf("回撤复核失败：%v", riskErr))

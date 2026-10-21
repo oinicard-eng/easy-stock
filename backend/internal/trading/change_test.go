@@ -3,6 +3,8 @@ package trading
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"testing"
 	"time"
 
@@ -149,5 +151,29 @@ func TestPlanDoesNotSkipWhenManual(t *testing.T) {
 	}
 	if second.DecisionID == "" {
 		t.Fatalf("第二轮应产生裁决：%+v", second)
+	}
+}
+
+func TestChangeBaselineSurvivesRestart(t *testing.T) {
+	service := newTestService(t, `{"regime":"观望","summary":"没有机会","orders":[]}`, map[string]foundation.Quote{
+		"600000.SH": testQuote("600000.SH", "浦发银行", 10, 9.9),
+	})
+	ctx := context.Background()
+	request := PlanRequest{
+		Watchlist: []string{"600000.SH"}, TraderProfile: "balanced", skipOnNoChange: true,
+	}
+	if _, err := service.RunPlanSync(ctx, request, "cyc-1"); err != nil {
+		t.Fatalf("首轮生成失败：%v", err)
+	}
+
+	// 用同一个 store 新建一个 Service，等价于进程重启：内存基线为空。
+	restarted := NewService(service.store, fakeGateway{content: `{"regime":"观望","summary":"没有机会","orders":[]}`}, fakeQuotes{quotes: map[string]foundation.Quote{
+		"600000.SH": testQuote("600000.SH", "浦发银行", 10, 9.9),
+	}}, nil, log.New(io.Discard, "", 0))
+	restarted.SetResearchEnabled(false)
+
+	// 基线从 KV 恢复后，20 分钟窗口内的重复输入应照常跳过。
+	if _, err := restarted.RunPlanSync(ctx, request, "cyc-2"); !errors.Is(err, ErrNoMaterialChange) {
+		t.Fatalf("重启后应能从 KV 恢复基线并跳过，实际 err=%v", err)
 	}
 }

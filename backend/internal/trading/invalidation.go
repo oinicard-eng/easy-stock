@@ -31,7 +31,9 @@ type InvalidationSpec struct {
 	// PriceAbove：现价涨破此价，论点失效。用于"涨到目标位之后逻辑已兑现"的情形。
 	PriceAbove float64 `json:"price_above,omitempty"`
 	// SectorFlow：板块资金条件，例如 "industry:半导体 转为净流出"。
-	// 只作为事实回灌提示词，不参与代码判定——守卫在盘中拿不到板块资金序列。
+	// 既回灌提示词也参与代码判定：守卫拿到板块资金流（5 分钟缓存）后，
+	// 按主力净占比 ≤ -1%（与事件通道同口径）触发减仓。数据缺失时
+	// 明确跳过该成员，与"资金未转负"严格区分。
 	SectorFlow string `json:"sector_flow,omitempty"`
 	// DeadlineDays：预期兑现的交易日数。超过后仍未盈利即视为判断失效。
 	DeadlineDays int `json:"deadline_days,omitempty"`
@@ -49,6 +51,46 @@ func (s InvalidationSpec) Empty() bool {
 //
 // 返回的 reason 直接进入裁决消息与事件，必须写清"哪个条件、什么数字"：
 // 复盘时要能一眼看出这次减仓是价格触发的还是时间触发的。
+// sectorFlowInvalidationRatio 是失效条件中"板块资金转负"的判定线。
+// 与事件通道共用同一口径（主力净占比 ≤ -1%）：同一句"资金转负"，
+// 不能在事件通道里是一个意思、在失效条件里是另一个意思。
+const sectorFlowInvalidationRatio = eventSectorFlowNegativeRatio
+
+// sectorFlowTarget 从模型写的自由文本里提取板块名。
+// 支持 "industry:半导体 转为净流出"、"半导体板块资金转负"、"白酒资金流出" 等写法。
+// 提取不出可信的板块名时返回空串——判不出来就不判，绝不拿整句话去猜匹配。
+func (s InvalidationSpec) sectorFlowTarget() string {
+	text := strings.TrimSpace(s.SectorFlow)
+	for _, prefix := range []string{"industry:", "concept:", "industry：", "concept：", "行业：", "行业:", "板块：", "板块:"} {
+		if strings.HasPrefix(text, prefix) {
+			text = strings.TrimPrefix(text, prefix)
+			break
+		}
+	}
+	for _, marker := range []string{"转为净流出", "资金流出", "净流出", "流出"} {
+		if index := strings.Index(text, marker); index >= 0 {
+			text = text[:index]
+		}
+	}
+	text = strings.Trim(strings.TrimSpace(text), "，。,.;；:：")
+	text = strings.TrimSuffix(text, "板块")
+	return strings.TrimSpace(text)
+}
+
+// triggeredBySectorFlow 判断板块资金条件是否成立，返回可展示的原因。
+// flows 为 nil 表示守卫拿不到资金流数据：返回 ok=false 的语义是"判不了"，
+// 不是"未触发"——这两种情形在复盘里必须能区分。
+func (s InvalidationSpec) triggeredBySectorFlow(flows map[string]float64) (string, bool) {
+	target := s.sectorFlowTarget()
+	if target == "" || len(flows) == 0 {
+		return "", false
+	}
+	if ratio, ok := matchSectorFlow(flows, target); ok && ratio <= sectorFlowInvalidationRatio {
+		return fmt.Sprintf("板块「%s」主力资金净占比 %.2f%%（低于 %.1f%% 阈值）", target, ratio, sectorFlowInvalidationRatio), true
+	}
+	return "", false
+}
+
 func (s InvalidationSpec) Triggered(price float64, heldDays int) (bool, string) {
 	if price > 0 && s.PriceBelow > 0 && price <= s.PriceBelow {
 		return true, fmt.Sprintf("现价 %.2f 跌破失效价 %.2f", price, s.PriceBelow)

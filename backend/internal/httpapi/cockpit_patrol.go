@@ -31,6 +31,10 @@ type cockpitLiveFacts struct {
 	at    time.Time
 	phase cockpit.Phase
 	facts cockpit.Facts
+	// carry 是最近一次非空的资金榜与快讯：上游在盘前/休市时段返回空列表时兜底展示，
+	// 避免题材涨跌、资金流向卡在盘面上消失。carry 跨阶段保留，重启后从巡查记录回种。
+	carry  cockpit.Facts
+	seeded bool
 }
 
 // cockpitNarrator 把 AI 叙述接到统一 Agent 运行时。驾驶舱巡查不需要工具，
@@ -290,7 +294,13 @@ func (s *Server) cockpitFacts(w http.ResponseWriter, r *http.Request) {
 	// 用后台上下文采集：客户端中途断开不应把半份结果写进缓存。
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	facts := cockpit.CollectFacts(ctx, state.Phase, s.cockpitFeed())
+	if !live.seeded {
+		// 首次采集前先从持久化的巡查记录回种兜底数据，覆盖服务重启后的空窗。
+		live.carry = cockpit.SeedCarryFromBriefs(s.cockpit.Store().List("", 40))
+		live.seeded = true
+	}
+	facts := cockpit.CarryOverBoards(live.carry, cockpit.CollectFacts(ctx, state.Phase, s.cockpitFeed()))
+	live.carry = facts
 	live.at, live.phase, live.facts = time.Now(), state.Phase, facts
 	writeJSON(w, http.StatusOK, cockpitFactsPayload(state, live.at, facts))
 }

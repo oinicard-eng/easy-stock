@@ -216,6 +216,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateRiskState(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateStateKV(ctx); err != nil {
+		return err
+	}
 	return s.migrateReports(ctx)
 }
 

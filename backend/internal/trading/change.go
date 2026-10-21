@@ -1,6 +1,7 @@
 package trading
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -114,12 +115,38 @@ func SnapshotFingerprint(snapshot Snapshot, pending []Order, blocks []BlockedInt
 
 // baseline 记录上一次真正调用模型时的指纹。
 //
-// 它是内存值而不是数据库标记：进程重启后重新问一次模型是正确行为——
-// 中间停机的那段时间发生了什么，只靠指纹是推不出来的。
+// 内存为主、KV 为辅：指纹本身落一份到 trading_state，进程崩溃重启后
+// 可以沿用（20 分钟窗口检查天然兜住停机期间的不确定性——停机超过窗口，
+// age 超界照样会问模型；只有几秒级重启才真正受益）。早先版本刻意只放
+// 内存，理由是"停机期间发生了什么推不出来"，但那个顾虑已经被窗口
+// 检查覆盖，持久化不会引入"拿旧结论应付新行情"的风险。
 type changeBaseline struct {
 	fingerprint string
 	at          time.Time
 	planID      string
+}
+
+const changeBaselineKey = "change_baseline"
+
+// loadChangeBaseline 从 KV 恢复上一次的指纹基线。
+// 任何解析失败都按"没有基线"处理：状态丢了能自愈，代价是多问一次模型。
+func (s *Service) loadChangeBaseline() (changeBaseline, bool) {
+	if s.store == nil {
+		return changeBaseline{}, false
+	}
+	raw, ok, err := s.store.GetState(context.Background(), changeBaselineKey)
+	if err != nil || !ok || raw == "" {
+		return changeBaseline{}, false
+	}
+	parts := strings.SplitN(raw, "|", 3)
+	if len(parts) != 3 {
+		return changeBaseline{}, false
+	}
+	at, err := time.Parse(time.RFC3339Nano, parts[1])
+	if err != nil {
+		return changeBaseline{}, false
+	}
+	return changeBaseline{fingerprint: parts[0], at: at, planID: parts[2]}, true
 }
 
 // shouldSkipNoChange 判断本轮是否可以跳过模型调用。
@@ -131,6 +158,13 @@ func (s *Service) shouldSkipNoChange(fingerprint string, now time.Time, enabled 
 	s.changeMu.Lock()
 	defer s.changeMu.Unlock()
 	baseline := s.change
+	if baseline.fingerprint == "" {
+		// 重启后内存基线为空：从 KV 恢复一次。恢复失败就当没有基线。
+		if loaded, ok := s.loadChangeBaseline(); ok {
+			baseline = loaded
+			s.change = loaded
+		}
+	}
 	if baseline.fingerprint == "" || baseline.fingerprint != fingerprint {
 		return false, ""
 	}
@@ -154,4 +188,12 @@ func (s *Service) recordChange(fingerprint, planID string, now time.Time) {
 	s.changeMu.Lock()
 	s.change = changeBaseline{fingerprint: fingerprint, at: now, planID: planID}
 	s.changeMu.Unlock()
+	// 落一份到 KV 供重启恢复。写失败只记日志：它不影响本轮决策，
+	// 最坏后果是重启后多问一次模型。
+	if s.store != nil {
+		if err := s.store.SetState(context.Background(), changeBaselineKey,
+			fingerprint+"|"+now.Format(time.RFC3339Nano)+"|"+planID); err != nil {
+			s.logf("event=change_baseline_persist_failed err=%v", err)
+		}
+	}
 }

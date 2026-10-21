@@ -62,6 +62,11 @@ func (s *Service) RunProtective(ctx context.Context, accountID, cycleID string) 
 		Quotes:       quotes,
 		Positions:    positions,
 	}
+	// 只在确有持仓写了板块资金失效条件时才取数：没有这类承诺的账户
+	// 不该为它多付一次外部请求。nil 的语义是"判不了"，不是"未触发"。
+	if anySectorInvalidation(positions) {
+		snapshot.SectorFlows = s.sectorFlowsForGuard(ctx)
+	}
 	rules := DefaultRiskRules()
 	result := BuildProtectiveOrders(snapshot, rules, DefaultGuardConfig(), time.Now())
 	// 复核计数在这一步累加：此刻价格已经取到、论点刚被逐只检查过，
@@ -167,6 +172,34 @@ func (s *Service) RunProtective(ctx context.Context, accountID, cycleID string) 
 	s.logf("event=trading_protective account=%s checked=%d triggered=%d filled=%d decision=%s",
 		accountID, run.Checked, run.Triggered, run.Filled, decision.ID)
 	return run, nil
+}
+
+// anySectorInvalidation 判断是否有持仓写了板块资金类失效条件。
+func anySectorInvalidation(positions []Position) bool {
+	for _, position := range positions {
+		if position.InvalidationRule != nil && position.InvalidationRule.sectorFlowTarget() != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// sectorFlowsForGuard 返回守卫判定用的板块资金流（5 分钟缓存）。
+// 数据源未配置或取数失败返回 nil，语义是"这一条件判不了"。
+func (s *Service) sectorFlowsForGuard(ctx context.Context) map[string]float64 {
+	if s.sectorFlow == nil {
+		return nil
+	}
+	s.guardFlowMu.Lock()
+	defer s.guardFlowMu.Unlock()
+	now := time.Now()
+	if s.guardFlows != nil && now.Sub(s.guardFlowsAt) < eventSectorFlowInterval {
+		return s.guardFlows
+	}
+	flows := fetchSectorFlowMap(ctx, s.sectorFlow, s.logf)
+	s.guardFlows = flows
+	s.guardFlowsAt = now
+	return flows
 }
 
 // positionQuotes 取持仓标的的最新行情。批量一次请求，逐个标的发会慢到不可用。

@@ -2,6 +2,7 @@ package trading
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,4 +109,64 @@ func TestBuildOrdersStampsEntryRegime(t *testing.T) {
 	if orders[0].EntryRegime != "range" {
 		t.Fatalf("订单应带上入场环境 range，实际 %q", orders[0].EntryRegime)
 	}
+}
+
+func TestInvalidationSectorFlowTriggersReduce(t *testing.T) {
+	// 模型写下"半导体 转为净流出"，守卫拿到资金流数据后必须在代码层判定，
+	// 不能只回灌提示词指望模型自己想起来。
+	spec := InvalidationSpec{SectorFlow: "半导体 转为净流出"}
+	if target := spec.sectorFlowTarget(); target != "半导体" {
+		t.Fatalf("应从文本提取板块名，实际 %q", target)
+	}
+	position := Position{
+		Symbol: "688001.SH", Name: "华兴源创", Quantity: 1000, Available: 1000,
+		AverageCost: 20, LastPrice: 20, OpenedAt: openedDayAgo(),
+		InvalidationRule: &spec,
+	}
+	// 主力净占比 -2.4%：低于 -1% 阈值，触发减仓而非清仓。
+	flows := map[string]float64{"半导体": -2.4}
+	trigger, fraction, verdict := evaluatePosition(position, 20, 1, 0, DefaultRiskRules(), DefaultGuardConfig(), flows)
+	if trigger != TriggerInvalidation {
+		t.Fatalf("板块资金转负应触发失效减仓，实际 trigger=%s", trigger)
+	}
+	if fraction != invalidationReducePercent {
+		t.Fatalf("应减仓 %d%%，实际 %.0f%%", invalidationReducePercent, fraction)
+	}
+	if !strings.Contains(verdict.Message, "半导体") {
+		t.Fatalf("原因应写明板块与占比，实际 %s", verdict.Message)
+	}
+
+	// 占比 -0.4%：属于正常抖动，不触发。
+	trigger, _, _ = evaluatePosition(position, 20, 1, 0, DefaultRiskRules(), DefaultGuardConfig(), map[string]float64{"半导体": -0.4})
+	if trigger != TriggerNoTrigger {
+		t.Fatalf("轻微流出不该触发，实际 trigger=%s", trigger)
+	}
+
+	// flows 为 nil（数据源缺失）：判不了 ≠ 未触发，但也不该误触发。
+	trigger, _, _ = evaluatePosition(position, 20, 1, 0, DefaultRiskRules(), DefaultGuardConfig(), nil)
+	if trigger != TriggerNoTrigger {
+		t.Fatalf("无数据时不应触发（也不该报错），实际 trigger=%s", trigger)
+	}
+
+	// BuildProtectiveOrders 全链路：快照带资金流时应生成减仓卖单。
+	snapshot := Snapshot{
+		Equity: 100000, Cash: 80000,
+		Quotes:      []foundation.Quote{testQuote("688001.SH", "华兴源创", 20, 20.1)},
+		Positions:   []Position{position},
+		SectorFlows: flows,
+	}
+	result := BuildProtectiveOrders(snapshot, DefaultRiskRules(), DefaultGuardConfig(), time.Now())
+	if len(result.Orders) != 1 || result.Orders[0].Trigger != TriggerInvalidation {
+		t.Fatalf("守卫应生成失效减仓卖单：%+v", result.Orders)
+	}
+	// 688 开头是科创板，一手 200 股：1000 股的 50% 取整到整手是 400 股。
+	if result.Orders[0].Side != SideSell || result.Orders[0].Quantity != 400 {
+		t.Fatalf("应卖出 50%% 按整手取整 400 股，实际 %+v", result.Orders[0])
+	}
+}
+
+// openedDayAgo 返回一天前的建仓时间指针。
+func openedDayAgo() *time.Time {
+	t := time.Now().UTC().Add(-24 * time.Hour)
+	return &t
 }

@@ -159,7 +159,7 @@ func BuildProtectiveOrders(snapshot Snapshot, rules RiskRules, config GuardConfi
 		}
 		heldDays := holdingDays(position.OpenedAt, now)
 		atrPercent := snapshot.ATRPercent[normalizeSymbolOrEmpty(position.Symbol)]
-		trigger, fraction, verdict := evaluatePosition(position, price, heldDays, atrPercent, rules, config)
+		trigger, fraction, verdict := evaluatePosition(position, price, heldDays, atrPercent, rules, config, snapshot.SectorFlows)
 		if trigger == TriggerNoTrigger {
 			continue
 		}
@@ -214,7 +214,7 @@ func BuildProtectiveOrders(snapshot Snapshot, rules RiskRules, config GuardConfi
 // → 止盈（计划内兑现）→ 移动止损（保住利润）→ 时间止损（期限到了）。
 // 前两条是清仓，中间两条是减仓，最后两条按情形定力度——力度差异写在这里，
 // 因为"止损"和"失效"如果都用清仓执行，模型写下的失效条件就变成了第二个止损。
-func evaluatePosition(position Position, price float64, heldDays int, atrPercent float64, rules RiskRules, config GuardConfig) (string, float64, policy.Verdict) {
+func evaluatePosition(position Position, price float64, heldDays int, atrPercent float64, rules RiskRules, config GuardConfig, sectorFlows map[string]float64) (string, float64, policy.Verdict) {
 	profit := 0.0
 	if position.AverageCost > 0 {
 		profit = (price/position.AverageCost - 1) * 100
@@ -246,6 +246,17 @@ func evaluatePosition(position Position, price float64, heldDays int, atrPercent
 	// 否则一次误判会在连续几轮里把仓位砍到零。
 	if position.InvalidationRule != nil && position.AutoReduceAt == nil {
 		if hit, reason := position.InvalidationRule.Triggered(price, heldDays); hit {
+			return TriggerInvalidation, invalidationReducePercent, policy.Verdict{
+				Code: policy.CodeGuardInvalidation, Level: policy.LevelAdjust, Scope: policy.ScopePosition,
+				Symbol: position.Symbol, Metric: round2(profit),
+				Message: fmt.Sprintf("%s 失效条件成立：%s（浮盈 %+.2f%%），减仓 %d%% 而非清仓",
+					position.Symbol, reason, profit, invalidationReducePercent),
+			}
+		}
+		// 板块资金条件：此前只回灌提示词，这里接入代码判定。
+		// sectorFlows 为 nil（无数据源或取数失败）时跳过——"判不了"
+		// 不能被当成"未触发"，但也不能编造一个触发。
+		if reason, hit := position.InvalidationRule.triggeredBySectorFlow(sectorFlows); hit {
 			return TriggerInvalidation, invalidationReducePercent, policy.Verdict{
 				Code: policy.CodeGuardInvalidation, Level: policy.LevelAdjust, Scope: policy.ScopePosition,
 				Symbol: position.Symbol, Metric: round2(profit),

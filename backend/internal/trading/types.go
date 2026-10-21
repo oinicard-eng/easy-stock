@@ -337,6 +337,11 @@ type Snapshot struct {
 	// 刻意不进变化检测指纹——ATR 每天都在变，把它算进指纹会让"什么都没变"
 	// 这一判断永远不成立，安静模式立刻失效。
 	ATRPercent map[string]float64 `json:"atr_percent,omitempty"`
+	// SectorFlows 是板块资金流（板块名 → 主力净占比），供失效条件里的
+	// sector_flow 成员做代码判定。nil 表示守卫判不了这一条件：
+	// 数据源未配置或取数失败都要与"资金未转负"严格区分。
+	// 只在持仓带板块失效条件时才取数，普通轮次不多花这个请求。
+	SectorFlows map[string]float64 `json:"sector_flows,omitempty"`
 }
 
 // AvailableCash 返回快照时刻真正可用于新开仓的资金。

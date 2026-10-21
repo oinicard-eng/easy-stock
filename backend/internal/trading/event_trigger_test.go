@@ -125,3 +125,22 @@ func TestEventTriggerSkipsWithoutPreviousClose(t *testing.T) {
 		t.Fatal("没有昨收时不应猜一个日内跌幅出来")
 	}
 }
+
+func TestEquityBaselineSurvivesRestart(t *testing.T) {
+	autopilot, _, now := eventTestAutopilot(t)
+	accountID := DefaultAccountID
+
+	// 第一次观察写 KV；换一个新 Autopilot（等价重启）后应能恢复。
+	autopilot.saveEquityBaseline(accountID, 100000, now)
+	restarted := NewAutopilot(autopilot.service, log.New(io.Discard, "", 0))
+	equity, at, ok := restarted.loadEquityBaseline(accountID)
+	if !ok || equity != 100000 || !at.Equal(now) {
+		t.Fatalf("重启后应恢复权益基线，实际 equity=%v at=%v ok=%v", equity, at, ok)
+	}
+
+	// 损坏的值按"没有基线"处理，不能让比较逻辑拿到垃圾数据。
+	_ = autopilot.store.SetState(context.Background(), equityBaselineKey(accountID), "garbage")
+	if _, _, ok := autopilot.loadEquityBaseline(accountID); ok {
+		t.Fatal("损坏的基线值不应被恢复")
+	}
+}

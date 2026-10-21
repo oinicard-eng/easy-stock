@@ -77,6 +77,12 @@ type Service struct {
 	// sectorFlow 是可选能力：没配置资金流数据源时，对应工具会明确报错，
 	// 而不是让模型以为"今天没有资金流进任何板块"。
 	sectorFlow SectorFlowProvider
+	// guardFlow 缓存最近一次守卫用的板块资金流（5 分钟）。
+	// 守卫的检查频率远高于资金流的更新频率，不打缓存会把每一次防守线
+	// 检查都变成两次外部请求；缓存过期判定与事件通道共用同一间隔常量。
+	guardFlowMu  sync.Mutex
+	guardFlows   map[string]float64
+	guardFlowsAt time.Time
 	// kline / klineAlt 是日线与备用日线来源。同样是可选的：
 	// 没有它时 K 线工具报"数据源未配置"，其余功能不受影响。
 	kline    KLineProvider
@@ -549,7 +555,7 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	}
 	// 每次判断前先量一次净值。手动模式下没有循环，若只在自动循环里观察，
 	// 关闭自动驾驶期间的回撤就永远不会被记账，一开回来直接看到"回撤 0%"。
-	if _, riskErr := s.ObserveEquity(ctx, accountID, snapshot.Equity, time.Now()); riskErr != nil {
+	if _, riskErr := s.ObserveEquity(ctx, accountID, snapshot.Equity, time.Now(), request.TraderProfile); riskErr != nil {
 		s.logf("event=trading_drawdown_observe_failed plan=%s err=%v", planID, riskErr)
 	}
 
