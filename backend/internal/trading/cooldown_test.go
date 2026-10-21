@@ -215,3 +215,45 @@ func TestBuildOrdersBlocksBuyDuringCooldown(t *testing.T) {
 	}
 	_ = verdicts
 }
+
+func TestCooldownSurvivesWeekendLookback(t *testing.T) {
+	// 回归用例：周五 10:00 止损，4 小时交易时间 → 周一 10:00 解禁。
+	// 周一一早（9:30）判定时，这条记录的自然时间已过去约 71 小时。
+	// 回看窗口若固定为 48 小时，查询会漏掉它，冷静期在周一只剩最后半小时时
+	// 凭空消失——保护还在有效期内却被静默解除。
+	store := newCooldownStore(t)
+	constraints := func(hour, min int, want time.Weekday) time.Time {
+		base := time.Now().In(cstZone())
+		for offset := 0; offset < 8; offset++ {
+			day := base.AddDate(0, 0, offset)
+			if day.Weekday() == want {
+				y, m, d := day.Date()
+				return time.Date(y, m, d, hour, min, 0, 0, cstZone())
+			}
+		}
+		return time.Time{}
+	}
+	friday := constraints(10, 0, time.Friday)
+	monday := friday.AddDate(0, 0, 3)
+	now := time.Date(monday.Year(), monday.Month(), monday.Day(), 9, 30, 0, 0, cstZone())
+	insertClosedTrade(t, store, ClosedTrade{
+		AccountID: DefaultAccountID, Symbol: "600000.SH", Sector: "银行",
+		Trigger: TriggerStopLoss, PnLPercent: -6,
+		TradingDay: TradingDay(friday), ClosedAt: friday,
+	})
+	view, err := store.BuildCooldowns(context.Background(), DefaultAccountID, DefaultCooldownRule(), now)
+	if err != nil {
+		t.Fatalf("推导冷静期失败：%v", err)
+	}
+	cooldown, ok := view.Symbols["600000.SH"]
+	if !ok {
+		t.Fatal("跨周末的止损记录必须在周一早盘仍然生效")
+	}
+	wantUntil := time.Date(monday.Year(), monday.Month(), monday.Day(), 10, 0, 0, 0, cstZone())
+	if !cooldown.Until.Equal(wantUntil) {
+		t.Fatalf("解禁时刻应为周一 10:00，实际 %s", cooldown.Until)
+	}
+	if _, passed := view.Block("600000.SH", "银行", now); passed {
+		t.Fatal("周一 9:30 应仍在冷静期内")
+	}
+}

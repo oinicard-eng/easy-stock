@@ -92,9 +92,18 @@ func stopTrigger(trigger string) bool {
 func (s *Store) BuildCooldowns(ctx context.Context, accountID string, rule CooldownRule, now time.Time) (CooldownView, error) {
 	rule = rule.normalize()
 	view := CooldownView{Symbols: map[string]Cooldown{}, Sectors: map[string]Cooldown{}}
-	// 只看最近两天的记录：标的级窗口 4 小时、板块级是当日，
-	// 更早的止损与当前决策无关，而全表扫描会随交易历史线性变慢。
-	since := now.Add(-48 * time.Hour)
+	// 回看范围必须覆盖"最坏情况下的自然时间跨度"，不能再用固定的 48 小时：
+	// 窗口改为按交易时间累计后，周五上午的止损要到周一上午才解禁，
+	// 自然时间超过 48 小时。固定 48 小时会把这类跨周末的记录漏掉，
+	// 表现为"周一早盘冷静期凭空消失"——保护还在有效期内却被静默解除。
+	//
+	// 换算：每天 4 小时交易时间，5 个交易日折 7 个自然日，向上取整再加一周缓冲。
+	tradingDays := int(rule.SymbolHours/4) + 1
+	lookback := time.Duration(tradingDays/5+1) * 7 * 24 * time.Hour
+	if lookback < 48*time.Hour {
+		lookback = 48 * time.Hour
+	}
+	since := now.Add(-lookback)
 	rows, err := s.db.QueryContext(ctx, `SELECT content_json FROM trading_closed_trades
 		WHERE account_id=? AND closed_at>=? ORDER BY closed_at DESC`, accountID, nowText(since))
 	if err != nil {
