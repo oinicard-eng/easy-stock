@@ -137,8 +137,32 @@ func DefaultAutopilotConfig() AutopilotConfig {
 		Horizon:             "1-3 个交易日",
 		MaxDailyLossPercent: 3,
 		BuyCutoff:           "14:50",
-		MaxCyclesPerDay:     40,
+		// 与默认 180 秒间隔匹配：240 分钟 / 3 分钟 = 80 轮，正好覆盖整个交易时段。
+		MaxCyclesPerDay: 80,
 	}
+}
+
+// legacyMaxCyclesPerDay 是旧版固定的每日轮次上限。
+// 保留这个常量只为了识别"从没改过配额的账户"，把它升级到与间隔匹配的值。
+const legacyMaxCyclesPerDay = 40
+
+// tradingMinutesPerDay 是 A 股连续竞价的总时长（9:30-11:30 + 13:00-15:00）。
+const tradingMinutesPerDay = 240
+
+// cyclesForInterval 按交易时长反推当天能跑多少轮。
+// 上限 240 与 Normalize 的校验保持一致，防止把间隔设成 30 秒后额度失控。
+func cyclesForInterval(intervalSeconds int) int {
+	if intervalSeconds <= 0 {
+		intervalSeconds = DefaultAutopilotConfig().IntervalSeconds
+	}
+	cycles := tradingMinutesPerDay * 60 / intervalSeconds
+	if cycles < 1 {
+		cycles = 1
+	}
+	if cycles > 240 {
+		cycles = 240
+	}
+	return cycles
 }
 
 // Normalize 把越界或缺失的配置改回可用值。非法值一律回落到默认，
@@ -168,8 +192,16 @@ func (c AutopilotConfig) Normalize() AutopilotConfig {
 	if _, err := parseClock(c.BuyCutoff); err != nil {
 		c.BuyCutoff = defaults.BuyCutoff
 	}
+	// 配额必须与间隔匹配，否则会出现"跑到一半就停摆"：
+	// 60 秒间隔配 40 轮，一个上午就把全天额度用完，下午再也不会动，
+	// 界面上看起来像系统死了，实际是配额用尽。
+	// 这里按"把 240 分钟交易时段覆盖一遍"反推，间隔越短额度越大，上限 240。
 	if c.MaxCyclesPerDay <= 0 || c.MaxCyclesPerDay > 240 {
-		c.MaxCyclesPerDay = defaults.MaxCyclesPerDay
+		c.MaxCyclesPerDay = cyclesForInterval(c.IntervalSeconds)
+	} else if c.MaxCyclesPerDay == legacyMaxCyclesPerDay {
+		// 40 是旧版硬编码默认值，不是用户的选择：老配置存的就是它，
+		// 不跟着升级就会继续在盘中停摆。显式改过的其它值一律尊重。
+		c.MaxCyclesPerDay = cyclesForInterval(c.IntervalSeconds)
 	}
 	if strings.TrimSpace(c.AccountID) == "" {
 		c.AccountID = defaults.AccountID
