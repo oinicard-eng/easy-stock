@@ -124,7 +124,7 @@ func (s *Server) tradingMarket(w http.ResponseWriter, r *http.Request) {
 	if account, _, err := s.trading.AccountView(r.Context(), r.URL.Query().Get("account_id")); err == nil {
 		equity = account.Equity
 	}
-	market, board, err := s.trading.MarketStatus(r.Context(), 0, equity)
+	market, board, err := s.trading.MarketStatus(r.Context(), 0, equity, false)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -149,7 +149,7 @@ func (s *Server) tradingUniverse(w http.ResponseWriter, r *http.Request) {
 	if account, _, err := s.trading.AccountView(r.Context(), r.URL.Query().Get("account_id")); err == nil {
 		equity = account.Equity
 	}
-	_, board, err := s.trading.MarketStatus(r.Context(), limit, equity)
+	_, board, err := s.trading.MarketStatus(r.Context(), limit, equity, true)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return

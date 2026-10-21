@@ -42,6 +42,44 @@ type Candidate struct {
 	Reasons []string `json:"reasons"`
 }
 
+// Position 是一只标的在筛选时刻的入场位置事实。
+//
+// universe 自己不去取数：位置要读日线，而本包必须保持纯函数——
+// 给定同一份全市场快照与同一份位置，任何一天都能复现出同一个候选池。
+// 位置由调用方通过 Options.PositionBatch 批量喂进来。
+type Position struct {
+	// ChangePercent 是当日涨幅（%）。
+	ChangePercent float64 `json:"change_percent"`
+	// FromMA20Percent 是现价相对 20 日均线的偏离（%）。
+	FromMA20Percent float64 `json:"from_ma20_percent"`
+	// FromHigh20Percent 是现价距 20 日收盘最高价的回落幅度（%），0 表示正处新高。
+	// 它只用于展示，不参与筛选：实测站在新高本身几乎不影响收益。
+	FromHigh20Percent float64 `json:"from_high20_percent"`
+	// ConsecutiveUp 是连续上涨天数。
+	ConsecutiveUp int `json:"consecutive_up"`
+	// Bars 是参与计算的日线根数，用于判断这份位置事实够不够硬。
+	Bars int `json:"bars"`
+	// Measured 为 false 表示日线取不到，各项数值都不可信。
+	Measured bool `json:"measured"`
+}
+
+// EntryLimits 是位置判定的三条阈值，取值与 trading/policy 的 Limits 同源。
+//
+// 在 universe 里再定义一份而不是直接引用 policy：阈值必须来自同一个数，
+// 但包依赖不能反过来——universe 是被选中的下层，"什么算追高"属于策略参数，
+// 由上层注入。两处判定的一致性由 trading 包的对照测试守着，
+// 不允许各自漂移。
+type EntryLimits struct {
+	MaxChangePercent float64
+	MaxMA20Percent   float64
+	MaxUpDays        int
+}
+
+// Valid 表示三条阈值都已配置。
+func (l EntryLimits) Valid() bool {
+	return l.MaxChangePercent > 0 && l.MaxMA20Percent > 0 && l.MaxUpDays > 0
+}
+
 // Exclusion 记录一类被排除的标的及数量。
 type Exclusion struct {
 	Reason string `json:"reason"`
@@ -64,6 +102,13 @@ type Board struct {
 	Candidates []Candidate          `json:"candidates"`
 	Exclusions []Exclusion          `json:"exclusions"`
 	Market     cognition.MarketView `json:"market"`
+	// Positions 是本轮实际测到的入场位置（含最终没被选中的），
+	// 供上层直接复用，避免为了标注提示词再取一遍日线。
+	Positions map[string]Position `json:"positions,omitempty"`
+	// PositionChecked 表示本轮候选池经过位置筛选。
+	// 为 false 时 Exclusions 里不会有位置相关条目——两者必须一致，
+	// 否则复盘会看到"说好筛了位置，却一条超限都没有"。
+	PositionChecked bool `json:"position_checked"`
 }
 
 // Symbols 返回候选池的代码列表，保持排序。
@@ -95,6 +140,16 @@ type Options struct {
 	MaxPerIndustry int
 	// MaxPerBoardRatio 是同一板块最多占比，默认 0.45。
 	MaxPerBoardRatio float64
+	// PositionBatch 批量返回标的的入场位置，由调用方注入。
+	// 为 nil 时完全跳过位置筛选，候选池与引入该字段之前完全一致。
+	PositionBatch func(symbols []string) map[string]Position
+	// EntryLimits 是位置判定阈值。PositionBatch 非 nil 但本字段无效时跳过。
+	EntryLimits EntryLimits
+	// PositionWindow 是一次送去测位置的数量上限。
+	//
+	// 取默认值时按 Limit 的 3 倍（下限 60，上限 150）：位置超限率实测约四成
+	// （2026-10-21 是 28 只里的 13 只），窗口等于 Limit 会把池子筛不满。
+	PositionWindow int
 }
 
 // DefaultOptions 是经过取舍的默认参数。
@@ -278,14 +333,24 @@ func Build(entries []foundation.StockCatalogEntry, market cognition.MarketView, 
 		return scores[order[i]] > scores[order[j]]
 	})
 
-	// 第四轮：分散约束。按分数从高到低选，但同行业与同板块设上限。
+	// 第四轮：位置筛选 + 分散约束，合成一遍。
 	//
-	// 这一步是必要的，不是锦上添花。实测某日按纯分数排序，15 只候选里 11 只是科创板，
-	// 且集中在半导体与机器人——看似分散在 15 个标的上，实际是同一个风险敞口，
-	// 板块回调时会一起跌。真实交易员的分散不是数代码个数，而是数独立风险来源。
+	// 为什么位置必须在"选"之前筛，而不是选完再拦：位置超限的票即使进了池，
+	// 下单前也会被硬规则取消，占着名额却买不了。实测 2026-10-21 那一轮
+	// 28 只候选有 13 只（46%）卡在位置上，前 6 名里 5 只不可买——
+	// 模型看到的是一份大半不能执行的清单，而它无从知道这一点，
+	// 只能按"这些是系统挑出来最好的"去推理。选股与风控在这里互相抵消。
 	//
-	// 代价是可能选入分数略低的标的。这个取舍是值得的：组合亏损的主因从来不是
-	// "少赚了几个点"，而是"以为分散了、其实全押在一个方向上"。
+	// 又为什么合成一遍而不是先筛位置再筛分散：两步串联会连锁收窄。
+	// 位置筛完剩下的票若集中在两个行业，分散约束会再把它们砍到个位数，
+	// 池子从 30 掉到 6——而正确做法是继续往下找，不是接受一个空池。
+	//
+	// 分散约束为什么必要，不是锦上添花：实测某日按纯分数排序，15 只候选里
+	// 11 只是科创板，且集中在半导体与机器人——看似分散在 15 个标的上，
+	// 实际是同一个风险敞口，板块回调时会一起跌。真实交易员的分散不是数代码
+	// 个数，而是数独立风险来源。代价是可能选入分数略低的标的；
+	// 这个取舍值得：组合亏损的主因从来不是"少赚了几个点"，
+	// 而是"以为分散了、其实全押在一个方向上"。
 	maxPerBoard := options.Limit
 	if options.MaxPerBoardRatio > 0 && options.MaxPerBoardRatio < 1 {
 		maxPerBoard = int(math.Ceil(float64(options.Limit) * options.MaxPerBoardRatio))
@@ -293,33 +358,9 @@ func Build(entries []foundation.StockCatalogEntry, market cognition.MarketView, 
 			maxPerBoard = 1
 		}
 	}
-	industryCount := map[string]int{}
-	boardCount := map[string]int{}
-	selected := make([]int, 0, options.Limit)
-	for _, index := range order {
-		entry := liquid[index]
-		// 按大类计数，而不是按数据源给的细分行业名：后者会让
-		// 「半导体 3 只 + 电子元件 3 只 + 消费电子 3 只」通过约束，
-		// 实际全押在同一个电子周期上。
-		sector := sectorOf(entry.Industry)
-		if sector != "" && options.MaxPerIndustry > 0 && industryCount[sector] >= options.MaxPerIndustry {
-			counter.add("同类风险敞口已达上限（"+sector+"）", entry)
-			continue
-		}
-		boardName := boardOf(entry.Symbol)
-		if boardCount[boardName] >= maxPerBoard {
-			counter.add("同板块候选已达上限（避免单一风险）", entry)
-			continue
-		}
-		if sector != "" {
-			industryCount[sector]++
-		}
-		boardCount[boardName]++
-		selected = append(selected, index)
-		if len(selected) >= options.Limit {
-			break
-		}
-	}
+	board.PositionChecked = options.PositionBatch != nil && options.EntryLimits.Valid()
+	selected, positions := selectOrder(order, liquid, options, counter, maxPerBoard)
+	board.Positions = positions
 	if len(selected) < options.Limit {
 		board.Capped = true
 	}
@@ -346,6 +387,115 @@ func Build(entries []foundation.StockCatalogEntry, market cognition.MarketView, 
 	board.Candidates = candidates
 	board.Exclusions = counter.list()
 	return board
+}
+
+// selectOrder 按基础分顺序选出候选，同时施加位置与分散两道约束。
+//
+// 位置取数按窗口批量进行：窗口默认 3×Limit（下限 60、上限 150），
+// 最多三窗。绝大多数交易日第一窗就填满，只有极端普涨行情（可选标的少）
+// 才会走到第二、三窗；跑完预算仍没填满，就把池子如实标成 Capped，
+// 而不是继续拉几百只票的日线。
+//
+// 预算之外的尾部候选没有位置事实，按"未知"放行——这与下单前
+// risk.entry_unmeasured 只记 warn 的口径一致：数据源的态度不该在选股层
+// 变成一道暗门。真正会误买的尾部标的，仍会被下单前那三条硬规则拦住。
+func selectOrder(order []int, liquid []foundation.StockCatalogEntry, options Options, counter *exclusionCounter, maxPerBoard int) ([]int, map[string]Position) {
+	checking := options.PositionBatch != nil && options.EntryLimits.Valid()
+	var positions map[string]Position
+	if checking {
+		positions = make(map[string]Position, 64)
+	}
+	window := options.PositionWindow
+	if window <= 0 {
+		window = options.Limit * 3
+		if window < 60 {
+			window = 60
+		}
+		if window > 150 {
+			window = 150
+		}
+	}
+	const maxWindows = 3
+
+	industryCount := map[string]int{}
+	boardCount := map[string]int{}
+	selected := make([]int, 0, options.Limit)
+	measuredUntil := 0
+	for index, entryIndex := range order {
+		if len(selected) >= options.Limit {
+			break
+		}
+		if checking && index >= measuredUntil {
+			if index >= window*maxWindows {
+				// 取数预算用完还没填满池子：停在这里，把池子如实标成 Capped。
+				// 不继续往下取，也不把剩下的票按"未知"放行——那等于在
+				// 一个连前 180 名都全部超限的行情里闭着眼睛买入，
+				// 与"宁可少选，也不放松分散"是同一条原则。
+				break
+			}
+			end := index + window
+			if end > len(order) {
+				end = len(order)
+			}
+			batch := make([]string, 0, end-index)
+			for _, pending := range order[index:end] {
+				batch = append(batch, liquid[pending].Symbol)
+			}
+			for symbol, position := range options.PositionBatch(batch) {
+				positions[symbol] = position
+			}
+			measuredUntil = end
+		}
+		entry := liquid[entryIndex]
+		if checking {
+			if position, ok := positions[entry.Symbol]; ok && position.Measured {
+				if reason := PositionBlockReason(position, options.EntryLimits); reason != "" {
+					counter.add(reason, entry)
+					continue
+				}
+			}
+		}
+		// 按大类计数，而不是按数据源给的细分行业名：后者会让
+		// 「半导体 3 只 + 电子元件 3 只 + 消费电子 3 只」通过约束，
+		// 实际全押在同一个电子周期上。
+		sector := sectorOf(entry.Industry)
+		if sector != "" && options.MaxPerIndustry > 0 && industryCount[sector] >= options.MaxPerIndustry {
+			counter.add("同类风险敞口已达上限（"+sector+"）", entry)
+			continue
+		}
+		boardName := boardOf(entry.Symbol)
+		if boardCount[boardName] >= maxPerBoard {
+			counter.add("同板块候选已达上限（避免单一风险）", entry)
+			continue
+		}
+		if sector != "" {
+			industryCount[sector]++
+		}
+		boardCount[boardName]++
+		selected = append(selected, entryIndex)
+	}
+	return selected, positions
+}
+
+// PositionBlockReason 判断这个位置为什么不该开新仓，可买时返回空字符串。
+//
+// 这里是选股层的口径，trading.CheckEntryPosition 是下单层的口径，
+// 两者必须完全一致：选股层放进来、下单层再拦掉，等于白算一次；
+// 选股层拦掉、下单层放行，则是池子里没有它、模型也点不到它。
+// 一致性由 trading 包的 TestEntryLimitsMatchPolicy 守着，改一处不改另一处会红。
+func PositionBlockReason(position Position, limits EntryLimits) string {
+	if !position.Measured {
+		return ""
+	}
+	switch {
+	case position.ChangePercent >= limits.MaxChangePercent:
+		return "入场位置超限：当日涨幅已到上限（在接别人的止盈盘）"
+	case position.FromMA20Percent >= limits.MaxMA20Percent:
+		return "入场位置超限：现价高出 20 日均线过多（等回踩）"
+	case position.ConsecutiveUp >= limits.MaxUpDays:
+		return "入场位置超限：已连续上涨到趋势末端"
+	}
+	return ""
 }
 
 // scoreOf 计算 0~100 的合成分。每个维度都做了"过热惩罚"，

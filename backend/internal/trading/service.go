@@ -557,7 +557,11 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		return plan, errors.New(message)
 	}
 
-	snapshot, err := s.buildSnapshot(ctx, accountID, watchlist, autoUniverse, plan.Snapshot.Positions)
+	// 规则先算出来：选股阶段要用它判定"这个位置算不算追高"。
+	// 若留到这里之后再算，候选池就得先建、再回头筛，那是两套口径。
+	rules := RulesForProfile(request.TraderProfile)
+
+	snapshot, err := s.buildSnapshot(ctx, accountID, watchlist, autoUniverse, plan.Snapshot.Positions, rules)
 	if err != nil {
 		// 失败时保留已算出的市场认知与候选池，让"为什么没生成计划"可查，
 		// 而不是只剩一句错误文字。
@@ -591,7 +595,7 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 
 	// 阈值先算出来：即使这一轮因为"没有变化"被跳过，计划里也要留下它依据的额度，
 	// 否则复盘时会看到一份没有上限的跳过记录。
-	rules := RulesForProfile(request.TraderProfile)
+	// rules 在调用 buildSnapshot 之前就已经定稿（选股要用），这里只做落库。
 	plan.Rules = rules
 
 	// 总仓位上限在这里定稿一次。提示词、裁决、下单守门三处必须看到同一个数，
@@ -622,11 +626,19 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 		return plan, ErrNoMaterialChange
 	}
 
-	// 入场位置在调研之前算好：它是提示词的一部分（候选池里逐只标注），
+	// 入场位置在调研之前定稿：它是提示词的一部分（候选池里逐只标注），
 	// 也是裁决时的硬约束。放在跳过检测之后，安静轮次不会白花这几次取数。
+	//
+	// 选股阶段已经测过候选，这里是补齐池外标的（持仓加仓、手动指定）：
+	// 合并而不是覆盖，否则选股阶段的测量结果会被一次部分失败冲掉。
 	if positions := s.collectEntryPositions(ctx, snapshot.Universe, snapshot.Quotes); len(positions) > 0 {
-		snapshot.EntryPositions = positions
-		plan.Snapshot.EntryPositions = positions
+		if snapshot.EntryPositions == nil {
+			snapshot.EntryPositions = make(map[string]EntryPosition, len(positions))
+		}
+		for symbol, position := range positions {
+			snapshot.EntryPositions[symbol] = position
+		}
+		plan.Snapshot.EntryPositions = snapshot.EntryPositions
 	}
 
 	// 调研阶段：模型用只读工具自己查事实，然后才进计划提示词。
@@ -693,8 +705,11 @@ func (s *Service) generatePlan(ctx context.Context, planID, accountID string, wa
 	startedAt := time.Now()
 	// 自证日志：位置有没有真的算出来、这一轮挡掉了几只，必须在日志里能查到。
 	// 没有这一行，"位置已接入"只能靠读代码相信，而读代码相信正是上一轮出错的方式。
-	s.logf("event=trading_entry_position plan=%s measured=%d over_limit=%d", planID,
-		len(snapshot.EntryPositions), countEntryBlocked(snapshot, rules))
+	// pool_excluded 是选股阶段剔除的，order_blocked 是下单前再拦的：
+	// 后者正常应接近 0，偏大说明两层阈值在打架（见 countBoardPositionExcluded）。
+	s.logf("event=trading_entry_position plan=%s checked=%t measured=%d pool_excluded=%d order_blocked=%d",
+		planID, snapshot.Board != nil && snapshot.Board.PositionChecked,
+		len(snapshot.EntryPositions), countBoardPositionExcluded(snapshot.Board), countEntryBlocked(snapshot, rules))
 	result, err := agent.PromptUsingOptions(ctx, s.gateway, prompt, agent.PromptOptions{
 		Sandbox:              true,
 		AutoApprove:          true,
@@ -1393,7 +1408,11 @@ func (s *Service) normalizeWatchlist(symbols []string) ([]string, error) {
 // MarketStatus 返回当前市场认知与候选池，不含账户信息，供观察接口使用。
 // 与计划生成共用同一套计算，观察到的就是实际决策所依据的。
 // equity 为 0 时跳过"单手金额占比"约束，仅作纯选股预览。
-func (s *Service) MarketStatus(ctx context.Context, limit int, equity float64) (cognition.MarketView, universe.Board, error) {
+//
+// withPositions 控制候选项是否做位置筛选。为 true 时与真实决策完全一致，
+// 代价是要为几十只候选取日线（首次约 2-3 秒，30 分钟缓存内近乎免费）。
+// 只要市场认知、不需要候选池的调用方应传 false，否则会为一个数字付这份成本。
+func (s *Service) MarketStatus(ctx context.Context, limit int, equity float64, withPositions bool) (cognition.MarketView, universe.Board, error) {
 	if s.catalog == nil {
 		return cognition.MarketView{}, universe.Board{}, errors.New("未配置全市场行情源")
 	}
@@ -1407,10 +1426,19 @@ func (s *Service) MarketStatus(ctx context.Context, limit int, equity float64) (
 		options.Limit = limit
 	}
 	options.Equity = equity
+	if withPositions {
+		rules := DefaultRiskRules().Normalize()
+		options.EntryLimits = universe.EntryLimits{
+			MaxChangePercent: rules.MaxEntryChangePercent,
+			MaxMA20Percent:   rules.MaxEntryMA20Percent,
+			MaxUpDays:        rules.MaxEntryUpDays,
+		}
+		options.PositionBatch = s.entryPositionBatch(ctx, entries)
+	}
 	return market, universe.Build(entries, market, options), nil
 }
 
-func (s *Service) buildSnapshot(ctx context.Context, accountID string, watchlist []string, autoUniverse bool, knownPositions []Position) (Snapshot, error) {
+func (s *Service) buildSnapshot(ctx context.Context, accountID string, watchlist []string, autoUniverse bool, knownPositions []Position, rules RiskRules) (Snapshot, error) {
 	if s.quotes == nil {
 		return Snapshot{}, errors.New("行情服务未配置")
 	}
@@ -1429,6 +1457,8 @@ func (s *Service) buildSnapshot(ctx context.Context, accountID string, watchlist
 		board    universe.Board
 		hasBoard bool
 		catalog  []foundation.StockCatalogEntry
+		// entryPositions 来自选股阶段的位置测量，随快照带出去复用。
+		entryPositions map[string]EntryPosition
 	)
 	if s.catalog != nil {
 		catalogCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -1449,9 +1479,22 @@ func (s *Service) buildSnapshot(ctx context.Context, accountID string, watchlist
 				options := universe.DefaultOptions()
 				// 候选池必须知道账户规模：10 万账户买不起 500 元股票的小仓位。
 				options.Equity = account.Equity
+				// 位置在选股阶段就参与，而不是选完再拦。理由见 universe.filterByPosition：
+				// 超限的票进了池也买不了，只会让模型对着一份大半不可执行的清单推理。
+				options.EntryLimits = universe.EntryLimits{
+					MaxChangePercent: rules.MaxEntryChangePercent,
+					MaxMA20Percent:   rules.MaxEntryMA20Percent,
+					MaxUpDays:        rules.MaxEntryUpDays,
+				}
+				options.PositionBatch = s.entryPositionBatch(ctx, entries)
 				board = universe.Build(entries, market, options)
 				hasBoard = true
 				watchlist = board.Symbols()
+				// 选股阶段已经测过的位置直接带进快照：同一份事实标注提示词、
+				// 参与裁决，也让它三个月后还能查出"当时在什么位置买的"。
+				if positions := entryPositionsFromBoard(board.Positions); len(positions) > 0 {
+					entryPositions = positions
+				}
 				if len(watchlist) == 0 {
 					// 空池也要把市场认知带出去：失败原因是"市场恐慌"还是"筛不出票"，
 					// 对使用者是完全不同的信息，不能只留一句错误文字。
@@ -1522,6 +1565,7 @@ func (s *Service) buildSnapshot(ctx context.Context, accountID string, watchlist
 		Market:          market,
 		AutoUniverse:    autoUniverse,
 		Sectors:         sectorsFor(catalog, symbolSet),
+		EntryPositions:  entryPositions,
 	}
 	if hasBoard {
 		snapshot.Board = &board

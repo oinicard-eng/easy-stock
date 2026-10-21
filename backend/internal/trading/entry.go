@@ -50,9 +50,11 @@ package trading
 
 import (
 	"fmt"
+	"strings"
 
 	"easy-stock/backend/internal/foundation"
 	"easy-stock/backend/internal/trading/policy"
+	"easy-stock/backend/internal/trading/universe"
 )
 
 // entryMAPeriod 是均线窗口。20 日是 A 股最常用的短期位置基准，
@@ -198,6 +200,25 @@ func countEntryBlocked(snapshot Snapshot, rules RiskRules) int {
 		}
 	}
 	return blocked
+}
+
+// countBoardPositionExcluded 数出选股阶段因位置被剔除的候选。
+//
+// 与 countEntryBlocked 分开统计，是为了让两层口径的不一致立刻可见：
+// 位置前移到选股后，下单前那一层正常情况下应该接近 0。
+// 若两个数都很高，说明选股层把能买的筛掉了、外层又在拦，
+// 那不是"双保险"，是两套阈值在打架。
+func countBoardPositionExcluded(board *universe.Board) int {
+	if board == nil {
+		return 0
+	}
+	excluded := 0
+	for _, exclusion := range board.Exclusions {
+		if strings.HasPrefix(exclusion.Reason, "入场位置超限") {
+			excluded += exclusion.Count
+		}
+	}
+	return excluded
 }
 
 // EntryPositionLine 把位置事实渲染成提示词里的一行。

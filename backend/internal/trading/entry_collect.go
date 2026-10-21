@@ -7,10 +7,15 @@ package trading
 // "现价离 20 日均线多远"。把位置变成候选池里的一列数字，
 // 比指望它每次主动去查要可靠：数据摆在那儿，不用它也得看见。
 //
+// 位置有两个用处，因此取数点要早于选股：
+//  1. 选股时剔除位置超限的标的（universe.filterByPosition），
+//     否则池子里近一半是不可买的票，模型却在按"这些最好"推理；
+//  2. 下单前再判一次，覆盖候选池之外的情形（加仓、手动指定标的）。
+//
 // 成本控制：
 //   - 复用 loadATR 的 30 分钟缓存，同一只票一轮内只取一次，跨轮也不再重复取；
 //   - 并发 4 路，30 只候选约 3 秒；串行会是 12 秒；
-//   - 整体 12 秒硬超时，超时的票按"位置未知"处理，不阻断本轮计划。
+//   - 整批 12 秒硬超时，超时的票按"位置未知"处理，不阻断本轮计划。
 
 import (
 	"context"
@@ -18,12 +23,45 @@ import (
 	"time"
 
 	"easy-stock/backend/internal/foundation"
+	"easy-stock/backend/internal/trading/universe"
 )
 
 const (
 	entryFetchWorkers = 4
 	entryFetchTimeout = 12 * time.Second
 )
+
+// entryPositionBatch 返回一个供选股层调用的批量取位置函数。
+//
+// 行情用全市场快照里的那一份，不用实时报价：候选筛选发生在取实时行情之前，
+// 而同一交易日内快照的涨跌幅与实时值足够接近，判断"是否追高"不受影响；
+// 真缺了还有日线最后两根收盘兜底（见 entryPositionOf 的三级降级）。
+func (s *Service) entryPositionBatch(ctx context.Context, entries []foundation.StockCatalogEntry) func([]string) map[string]universe.Position {
+	bySymbol := make(map[string]foundation.Quote, len(entries))
+	for _, entry := range entries {
+		bySymbol[entry.Symbol] = foundation.Quote{
+			Symbol:        entry.Symbol,
+			Name:          entry.Name,
+			Price:         entry.Price,
+			ChangePercent: entry.ChangePercent,
+		}
+	}
+	return func(symbols []string) map[string]universe.Position {
+		measured := s.collectPositions(ctx, symbols, bySymbol)
+		out := make(map[string]universe.Position, len(measured))
+		for symbol, position := range measured {
+			out[symbol] = universe.Position{
+				ChangePercent:     position.ChangePercent,
+				FromMA20Percent:   position.FromMA20Percent,
+				FromHigh20Percent: position.FromHigh20Percent,
+				ConsecutiveUp:     position.ConsecutiveUp,
+				Bars:              position.Bars,
+				Measured:          position.Measured,
+			}
+		}
+		return out
+	}
+}
 
 // collectEntryPositions 批量取位置。返回的 map 一定非 nil（可能为空），
 // 空 map 与 nil 的区别很重要：nil 表示"这批快照本就不带位置"，
@@ -33,6 +71,10 @@ func (s *Service) collectEntryPositions(ctx context.Context, symbols []string, q
 	for _, quote := range quotes {
 		bySymbol[quote.Symbol] = quote
 	}
+	return s.collectPositions(ctx, symbols, bySymbol)
+}
+
+func (s *Service) collectPositions(ctx context.Context, symbols []string, bySymbol map[string]foundation.Quote) map[string]EntryPosition {
 	unique := make([]string, 0, len(symbols))
 	seen := make(map[string]bool, len(symbols))
 	for _, symbol := range symbols {
@@ -79,4 +121,24 @@ func (s *Service) collectEntryPositions(ctx context.Context, symbols []string, q
 		s.logf("event=trading_entry_position_partial got=%d want=%d", len(positions), len(unique))
 	}
 	return positions
+}
+
+// entryPositionsFromBoard 把选股层测到的位置转成快照口径，避免重复取数。
+func entryPositionsFromBoard(positions map[string]universe.Position) map[string]EntryPosition {
+	if len(positions) == 0 {
+		return nil
+	}
+	out := make(map[string]EntryPosition, len(positions))
+	for symbol, position := range positions {
+		out[symbol] = EntryPosition{
+			Symbol:            symbol,
+			ChangePercent:     position.ChangePercent,
+			FromMA20Percent:   position.FromMA20Percent,
+			FromHigh20Percent: position.FromHigh20Percent,
+			ConsecutiveUp:     position.ConsecutiveUp,
+			Bars:              position.Bars,
+			Measured:          position.Measured,
+		}
+	}
+	return out
 }

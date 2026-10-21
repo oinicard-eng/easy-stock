@@ -194,3 +194,47 @@ func snippetAround(text, keyword string) string {
 	}
 	return text[index:end]
 }
+
+// 选股层与下单层的位置口径必须完全一致。
+//
+// 两处各写了一遍判断（universe.PositionBlockReason 与 CheckEntryPosition），
+// 这是刻意的：universe 是纯函数、不能反过来依赖 trading，而把判定塞进
+// 一个共享包又会让"什么算追高"散落在第三处。代价是可能漂移，
+// 所以用这条对照测试把两边钉住：改一处不改另一处，这里就红。
+//
+// 漂移的后果不是小事——选股层放进来、下单层再拦掉，等于白算一次；
+// 选股层拦掉、下单层放行，则是"池子里没有它、模型也点不到它"，
+// 而日志里两条数字会同时看起来正常。
+func TestEntryLimitsMatchPolicy(t *testing.T) {
+	rules := DefaultRiskRules().Normalize()
+	limits := universe.EntryLimits{
+		MaxChangePercent: rules.MaxEntryChangePercent,
+		MaxMA20Percent:   rules.MaxEntryMA20Percent,
+		MaxUpDays:        rules.MaxEntryUpDays,
+	}
+	cases := []EntryPosition{
+		{ChangePercent: 0, FromMA20Percent: 0, ConsecutiveUp: 0, Measured: true},
+		{ChangePercent: 5.99, FromMA20Percent: 11.99, ConsecutiveUp: 4, Measured: true},
+		{ChangePercent: 6, FromMA20Percent: 0, ConsecutiveUp: 0, Measured: true},
+		{ChangePercent: 9.8, FromMA20Percent: 2, ConsecutiveUp: 1, Measured: true},
+		{ChangePercent: 1, FromMA20Percent: 12, ConsecutiveUp: 1, Measured: true},
+		{ChangePercent: 1, FromMA20Percent: 40, ConsecutiveUp: 1, Measured: true},
+		{ChangePercent: 1, FromMA20Percent: 2, ConsecutiveUp: 5, Measured: true},
+		{ChangePercent: 1, FromMA20Percent: 2, ConsecutiveUp: 9, Measured: true},
+		{Measured: false},
+	}
+	for _, position := range cases {
+		position.Symbol = "600000.SH"
+		_, blocked := CheckEntryPosition(Order{Symbol: position.Symbol}, position, rules)
+		poolReason := universe.PositionBlockReason(universe.Position{
+			ChangePercent:   position.ChangePercent,
+			FromMA20Percent: position.FromMA20Percent,
+			ConsecutiveUp:   position.ConsecutiveUp,
+			Measured:        position.Measured,
+		}, limits)
+		if blocked != (poolReason != "") {
+			t.Fatalf("%+v：下单层 blocked=%t，选股层 reason=%q，两层口径不一致",
+				position, blocked, poolReason)
+		}
+	}
+}
