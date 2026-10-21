@@ -245,7 +245,14 @@ func (a *Autopilot) tick() {
 	// 否则模型超时会变成每 15 秒一次的重试风暴。
 	// 间隔按当前时刻查排班表：开盘与尾盘密、盘中稀，
 	// 因为 A 股 T+1 下盘中高频决策拿不到额外信息，却要按轮付费。
-	a.setNext(now.Add(time.Duration(config.IntervalAt(now)) * time.Second))
+	interval := config.IntervalAt(now)
+	next := now.Add(time.Duration(interval) * time.Second)
+	a.setNext(next)
+	// 这一行是排班唯一的"自证"：interval 是多少、下一轮定在几点，
+	// 出了问题能一眼看出是排班没命中、还是被别处覆盖了 nextRun。
+	// 只在真正到点时打，不会像每 15 秒一条的日志那样把有用的行冲掉。
+	a.logf("event=autopilot_schedule interval=%ds next=%s", interval,
+		next.In(time.FixedZone("CST", 8*3600)).Format("15:04:05"))
 
 	// 当日已熔断：只撮合既有挂单，不再调模型开新仓。
 	// 熔断的意义就是"今天到此为止"，继续用模型碰运气等于没有熔断。
@@ -1015,8 +1022,11 @@ func (a *Autopilot) Configure(ctx context.Context, config AutopilotConfig) (Auto
 		// 打开后尽快跑第一轮，而不是等满一个间隔。
 		a.setNext(a.now())
 	}
-	a.logf("event=autopilot_configured account=%s enabled=%t auto_execute=%t interval=%ds quota=%d",
-		saved.AccountID, saved.Enabled, saved.AutoExecute, saved.IntervalSeconds, saved.MaxCyclesPerDay)
+	// 打印的是 fallback 而不是"间隔"：真正生效的间隔由排班表按时刻决定，
+	// 每轮开始时 autopilot_schedule 会打出当时的真实值。
+	// 这一行写成 interval=%d 曾经误导过排查——看到的永远是 60，而实际是 900。
+	a.logf("event=autopilot_configured account=%s enabled=%t auto_execute=%t fallback=%ds tiers=%d quota=%d",
+		saved.AccountID, saved.Enabled, saved.AutoExecute, saved.IntervalSeconds, len(saved.Schedule), saved.MaxCyclesPerDay)
 	return saved, nil
 }
 

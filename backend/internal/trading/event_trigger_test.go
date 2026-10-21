@@ -144,3 +144,39 @@ func TestEquityBaselineSurvivesRestart(t *testing.T) {
 		t.Fatal("损坏的基线值不应被恢复")
 	}
 }
+
+// 重启不该让同一只票重新"变成今天还没触发过"。
+// 上午的实测：002917 在 25 分钟里发了 5 轮临时轮次，因为中间重启了 5 次，
+// 每次内存里的 fired 都清空——而它每轮看到的都是同一个事实。
+func TestEventFiredStateSurvivesRestart(t *testing.T) {
+	autopilot, service, now := eventTestAutopilot(t)
+	ctx := context.Background()
+	if _, fired := autopilot.eventTriggered(ctx, DefaultAccountID, now); !fired {
+		t.Fatal("首次应触发")
+	}
+
+	restarted := NewAutopilot(service, log.New(io.Discard, "", 0))
+	if _, again := restarted.eventTriggered(ctx, DefaultAccountID, now.Add(10*time.Minute)); again {
+		t.Fatal("重启后同一标的当日不应重复触发")
+	}
+}
+
+// 当日次数也要落 KV：否则每次重启都会把"每天最多 N 次"重新算一遍，
+// 重启足够多次时事件通道可以无限触发。
+func TestEventQuotaSurvivesRestart(t *testing.T) {
+	autopilot, service, now := eventTestAutopilot(t)
+	ctx := context.Background()
+	if _, fired := autopilot.eventTriggered(ctx, DefaultAccountID, now); !fired {
+		t.Fatal("首次应触发")
+	}
+	kept := autopilot.watch.count
+	if kept == 0 {
+		t.Fatal("触发后当日计数应至少为 1")
+	}
+
+	restarted := NewAutopilot(service, log.New(io.Discard, "", 0))
+	restarted.restoreEventState(ctx, DefaultAccountID, TradingDay(now))
+	if restarted.watch.count != kept {
+		t.Fatalf("重启后应恢复当日次数 %d，实际 %d", kept, restarted.watch.count)
+	}
+}

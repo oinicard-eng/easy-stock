@@ -42,6 +42,9 @@ const (
 	researchCallTimeout = 55 * time.Second
 	// researchResultChars 是单条工具结果注入下一轮提示词的字符上限。
 	researchResultChars = 1400
+	// earlyStepChars 是"较早步骤"的要点长度上限。
+	// 较早步骤不再参与下一步的推理，只用来防止重复查询，保留一行足够。
+	earlyStepChars = 160
 )
 
 // ResearchStep 是调研中的一步，既是提示词的输入，也是回放的记录。
@@ -309,17 +312,30 @@ func buildResearchPrompt(in ResearchInput, steps []ResearchStep, remaining int) 
 	builder.WriteString("你是 A 股交易调研员。任务是在生成交易计划之前，把关键事实查清楚。\n")
 	builder.WriteString("你不下单、不给买卖建议、不预测涨跌，只负责查询并陈述查到的事实。\n\n")
 
-	builder.WriteString("## 一、可用工具（只能从这里选）\n")
-	for _, spec := range in.Toolbox.Specs() {
-		params := make([]string, 0, len(spec.Params))
-		for _, param := range spec.Params {
-			mark := ""
-			if param.Required {
-				mark = "*"
+	// 工具清单只在第 1 步完整给出：它是整轮里最大的一块固定文本（十几条工具
+	// 加参数说明），而后续步骤的模型已经在同一段对话里见过它。
+	// 每步重传一遍，等于为"已经知道的东西"再付一次钱：4 步就是 4 倍。
+	// 后续步骤只留名字，够它指认工具，不够它忘掉工具存在。
+	specs := in.Toolbox.Specs()
+	if len(steps) == 0 {
+		builder.WriteString("## 一、可用工具（只能从这里选）\n")
+		for _, spec := range specs {
+			params := make([]string, 0, len(spec.Params))
+			for _, param := range spec.Params {
+				mark := ""
+				if param.Required {
+					mark = "*"
+				}
+				params = append(params, fmt.Sprintf("%s%s:%s", param.Name, mark, param.Type))
 			}
-			params = append(params, fmt.Sprintf("%s%s:%s", param.Name, mark, param.Type))
+			fmt.Fprintf(&builder, "- %s(%s)：%s\n", spec.Name, strings.Join(params, ", "), spec.Description)
 		}
-		fmt.Fprintf(&builder, "- %s(%s)：%s\n", spec.Name, strings.Join(params, ", "), spec.Description)
+	} else {
+		names := make([]string, 0, len(specs))
+		for _, spec := range specs {
+			names = append(names, spec.Name)
+		}
+		fmt.Fprintf(&builder, "## 一、可用工具（参数同第 1 步）：%s\n", strings.Join(names, "、"))
 	}
 
 	builder.WriteString("\n## 二、当前上下文\n")
@@ -357,8 +373,16 @@ func buildResearchPrompt(in ResearchInput, steps []ResearchStep, remaining int) 
 
 	if len(steps) > 0 {
 		builder.WriteString("\n## 三、你已经查到的\n")
-		for _, step := range steps {
-			fmt.Fprintf(&builder, "第 %d 步 %s(%s)：\n%s\n\n", step.Index, step.Tool, compactArgs(step.Args), step.Result)
+		for index, step := range steps {
+			// 只有最近两步保留完整结果：模型的下一步几乎总是基于"上一步看到了什么"，
+			// 更早的结果只用来提醒"这个维度查过了、结论是什么"。
+			// 全部保留会让第 4 步的输入变成前 3 步结果的简单相加——单轮里最贵的一项。
+			if index >= len(steps)-2 {
+				fmt.Fprintf(&builder, "第 %d 步 %s(%s)：\n%s\n\n", step.Index, step.Tool, compactArgs(step.Args), step.Result)
+				continue
+			}
+			fmt.Fprintf(&builder, "第 %d 步 %s(%s)：已查过，要点：%s\n\n", step.Index, step.Tool,
+				compactArgs(step.Args), clipRunes(oneLine(step.Result), earlyStepChars))
 		}
 	}
 
@@ -403,4 +427,27 @@ func compactArgs(args map[string]any) string {
 		return ""
 	}
 	return clipRunes(string(payload), 120)
+}
+
+// oneLine 把多行工具结果压成一行，用于"较早步骤"的要点摘要。
+// 不压缩的话，clipRunes 会从表格的第 1 行开始截，留下的全是表头，
+// 模型看到的是"查过、查了什么"却看不到"查到了什么"。
+func oneLine(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	parts := make([]string, 0, 4)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts = append(parts, line)
+		if len(parts) >= 3 {
+			break
+		}
+	}
+	return strings.Join(parts, " / ")
 }

@@ -178,3 +178,38 @@ func TestChangeBaselineSurvivesRestart(t *testing.T) {
 		t.Fatalf("重启后应能从 KV 恢复基线并跳过，实际 err=%v", err)
 	}
 }
+
+// 指纹必须忽略"改了也不影响决策"的抖动，否则跳过机制永远不生效。
+// 上一版把价格精确到分、成交量精确到元写进指纹：39 只票里只要有一只
+// 跳了一分钱、或成交量因为累计而必然增长，整轮就被判成"有变化"，
+// 于是每轮都付一次完整的模型调用。
+func TestSnapshotFingerprintIgnoresIntradayNoise(t *testing.T) {
+	baseline := changeTestSnapshot()
+	baseline.Quotes[0].Volume = 1.0e7
+	base := SnapshotFingerprint(baseline, nil, nil)
+
+	// 0.3% 的价格抖动（10.00 → 10.03，相对昨收 9.9 约 +1.01% → +1.31%，同一档），
+	// 成交量 +3%（累计值每轮都在涨，不量化就永远是"新数据"）。
+	noise := changeTestSnapshot()
+	noise.Quotes[0].Volume = 1.03e7
+	noise.Quotes[0].Price = 10.03
+	if got := SnapshotFingerprint(noise, nil, nil); got != base {
+		t.Fatalf("台阶以内的价格抖动与 10%% 以内的量能变化不该改变指纹：%s != %s", got, base)
+	}
+
+	// 持仓现价同样按台阶处理：浮盈从 5% 变 5.3% 不改变任何决策。
+	positionNoise := changeTestSnapshot()
+	positionNoise.Quotes[0].Volume = 1.0e7
+	positionNoise.Positions[0].LastPrice = 10.02
+	if got := SnapshotFingerprint(positionNoise, nil, nil); got != base {
+		t.Fatalf("持仓现价小幅抖动不该改变指纹：%s != %s", got, base)
+	}
+
+	// 超过台阶就必须算变化，否则会把真实异动吞掉。
+	material := changeTestSnapshot()
+	material.Quotes[0].Volume = 1.0e7
+	material.Quotes[0].Price = 10.5
+	if SnapshotFingerprint(material, nil, nil) == base {
+		t.Fatal("1%% 以上的价格变化必须改变指纹")
+	}
+}

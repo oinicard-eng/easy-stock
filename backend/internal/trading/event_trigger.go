@@ -60,6 +60,9 @@ const (
 type eventWatch struct {
 	// fired 记录"某标的在某天已经触发过"，避免日内跌幅持续成立时反复触发。
 	fired map[string]string
+	// firedDay 是 fired 属于哪一天，也是"当天状态是否已从 KV 恢复"的标记。
+	// 只有它和当天一致时，内存里的 fired 才算完整——重启后它会是空的。
+	firedDay string
 	// lastAt 是上一次事件触发的时刻，用于最小间隔。
 	lastAt time.Time
 	// countDay / count 是当日已触发次数。
@@ -94,11 +97,22 @@ func (a *Autopilot) eventTriggered(ctx context.Context, accountID string, now ti
 		a.watch.count = 0
 		a.watch.fired = map[string]string{}
 	}
-	if a.watch.count >= eventMaxPerDay {
+	needsRestore := a.watch.firedDay != day
+	overQuota := a.watch.count >= eventMaxPerDay
+	a.mu.Unlock()
+
+	if needsRestore {
+		// 重启后内存是空的：把当天已触发的标的和已用次数读回来。
+		// 不读回来的后果上午已经出现过一次——同一只票在 25 分钟里发了 5 轮，
+		// 因为它每重启一次就"重新变成今天还没触发过"。
+		a.restoreEventState(ctx, accountID, day)
+		a.mu.Lock()
+		overQuota = a.watch.count >= eventMaxPerDay
 		a.mu.Unlock()
+	}
+	if overQuota {
 		return "", false
 	}
-	a.mu.Unlock()
 
 	account, positions, err := a.service.AccountView(ctx, accountID)
 	if err != nil || len(positions) == 0 {
@@ -137,7 +151,7 @@ func (a *Autopilot) eventTriggered(ctx context.Context, accountID string, now ti
 	// 基线为空或已超出窗口时只重置，不判断：没有可比的过去，就没有"跌了多少"。
 	if baseline > 0 && !baselineAt.IsZero() && now.Sub(baselineAt) <= eventPortfolioWindow {
 		if drop := (1 - account.Equity/baseline) * 100; drop >= eventPortfolioDropPercent {
-			a.markEventFired(now)
+			a.markEventFired(ctx, accountID, day, now)
 			return fmt.Sprintf("组合权益 %.2f 分钟内从 %.2f 降至 %.2f（-%.2f%%），发起临时轮次",
 				round2(now.Sub(baselineAt).Minutes()), baseline, account.Equity, drop), true
 		}
@@ -164,16 +178,10 @@ func (a *Autopilot) eventTriggered(ctx context.Context, accountID string, now ti
 			continue
 		}
 		key := day + "|" + position.Symbol
-		a.mu.Lock()
-		already := a.watch.fired[key] != ""
-		if !already {
-			a.watch.fired[key] = day
-		}
-		a.mu.Unlock()
-		if already {
+		if !a.claimEvent(ctx, account.ID, day, key) {
 			continue
 		}
-		a.markEventFired(now)
+		a.markEventFired(ctx, account.ID, day, now)
 		return fmt.Sprintf("%s（权重 %.2f%%）日内跌 %.2f%% 至 %.2f，发起临时轮次",
 			position.Symbol, weight, drop, current), true
 	}
@@ -181,7 +189,7 @@ func (a *Autopilot) eventTriggered(ctx context.Context, accountID string, now ti
 	// 3. 板块级：价格还没跌，但主力资金已经在撤。
 	// 这一类早于价格信号：等板块指数跌下去再反应，持仓已经跟着跌了一截。
 	if reason, ok := a.sectorFlowNegative(ctx, account, positions, now); ok {
-		a.markEventFired(now)
+		a.markEventFired(ctx, account.ID, day, now)
 		return reason, true
 	}
 	return "", false
@@ -236,13 +244,7 @@ func (a *Autopilot) sectorFlowNegative(ctx context.Context, account Account, pos
 			continue
 		}
 		key := "flow|" + day + "|" + sector
-		a.mu.Lock()
-		already := a.watch.fired[key] != ""
-		if !already {
-			a.watch.fired[key] = day
-		}
-		a.mu.Unlock()
-		if already {
+		if !a.claimEvent(ctx, account.ID, day, key) {
 			continue
 		}
 		return fmt.Sprintf("%s 所属板块「%s」主力资金净占比 %.2f%%（转负），发起临时轮次",
@@ -296,13 +298,103 @@ func matchSectorFlow(flows map[string]float64, sector string) (float64, bool) {
 	return worst, found
 }
 
-// markEventFired 记账：次数 +1、记录时刻。间隔判定依赖 lastAt，
-// 忘记更新它会让事件通道退化成每 15 秒一次。
-func (a *Autopilot) markEventFired(now time.Time) {
+// markEventFired 记账：次数 +1、记录时刻，并把当天已用次数落 KV。
+// 间隔判定依赖 lastAt，忘记更新它会让事件通道退化成每 15 秒一次；
+// 次数不落 KV 则会让"每天最多 N 次"在每次重启后重新计算一遍，
+// 而重启恰恰是最常见的动作。
+func (a *Autopilot) markEventFired(ctx context.Context, accountID, day string, now time.Time) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.watch.lastAt = now
 	a.watch.count++
+	count := a.watch.count
+	keys := make([]string, 0, len(a.watch.fired))
+	for existing := range a.watch.fired {
+		keys = append(keys, existing)
+	}
+	a.mu.Unlock()
+
+	if a.store == nil {
+		return
+	}
+	payload := strconv.Itoa(count) + "|" + strings.Join(keys, "\n")
+	if err := a.store.SetState(ctx, eventStateKey(accountID, day), payload); err != nil {
+		a.logf("event=autopilot_event_state_failed err=%v", err)
+	}
+}
+
+// eventStateKey 是"当天已触发事件"在 KV 里的键名，按账户与日期区分。
+func eventStateKey(accountID, day string) string {
+	return "event_fired:" + accountID + ":" + day
+}
+
+// claimEvent 判断某个事件当天是否还能触发，并在能触发时立刻占用它。
+//
+// 为什么必须落 KV：内存里的 fired 会随进程重启清空，而重启是最常见的动作
+// （改配置、发版、崩溃恢复）。上午的实测就是这样：同一只票在 25 分钟里
+// 发了 5 轮临时轮次，因为中间重启了 5 次——每一轮都是一次完整的模型调用，
+// 而它看到的其实是同一个事实。
+//
+// 返回值 true 表示"这次归你了"，调用方可以继续发起轮次。
+func (a *Autopilot) claimEvent(ctx context.Context, accountID, day, key string) bool {
+	a.mu.Lock()
+	if a.watch.fired == nil {
+		a.watch.fired = map[string]string{}
+	}
+	if _, exists := a.watch.fired[key]; exists {
+		a.mu.Unlock()
+		return false
+	}
+	a.watch.fired[key] = day
+	keys := make([]string, 0, len(a.watch.fired))
+	for existing := range a.watch.fired {
+		keys = append(keys, existing)
+	}
+	count := a.watch.count
+	a.mu.Unlock()
+
+	if a.store != nil {
+		payload := strconv.Itoa(count) + "|" + strings.Join(keys, "\n")
+		if err := a.store.SetState(ctx, eventStateKey(accountID, day), payload); err != nil {
+			a.logf("event=autopilot_event_state_failed err=%v", err)
+		}
+	}
+	return true
+}
+
+// restoreEventState 在跨日或重启后把"当天已触发的事件"读回内存。
+// 读不到就保持空状态：宁可多发一轮，也不要因为一次读失败让风控通道停摆。
+func (a *Autopilot) restoreEventState(ctx context.Context, accountID, day string) {
+	if a.store == nil {
+		return
+	}
+	a.mu.Lock()
+	if a.watch.firedDay == day {
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Unlock()
+
+	raw, ok, err := a.store.GetState(ctx, eventStateKey(accountID, day))
+	if err != nil || !ok || raw == "" {
+		a.mu.Lock()
+		a.watch.firedDay = day
+		a.mu.Unlock()
+		return
+	}
+	head, list, _ := strings.Cut(raw, "|")
+	count, _ := strconv.Atoi(strings.TrimSpace(head))
+	restored := map[string]string{}
+	for _, key := range strings.Split(list, "\n") {
+		if key = strings.TrimSpace(key); key != "" {
+			restored[key] = day
+		}
+	}
+	a.mu.Lock()
+	a.watch.fired = restored
+	a.watch.firedDay = day
+	a.watch.countDay = day
+	a.watch.count = count
+	a.mu.Unlock()
 }
 
 // equityBaselineKey 是组合权益基线在 KV 里的键名，按账户区分。

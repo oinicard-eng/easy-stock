@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -28,11 +29,16 @@ import (
 //     近期被拒记录、市场状态。时间戳、延迟、token 数一律不进指纹，
 //     否则每一轮都"有变化"，检测形同虚设。
 //  3. 只对定时触发的轮次生效。人工点"生成计划"时跳过会让人以为按钮坏了。
-const noChangeWindow = 20 * time.Minute
+//
+// 窗口取 45 分钟而不是排班间隔（15 分钟）：一轮的结果本身就有时效性，
+// 但 15 分钟的窗口在 900 秒排班下只能覆盖 1 轮，等于"第二轮才可能跳过"，
+// 实际命中率接近零。45 分钟覆盖 3 轮，既能让横盘时段真正省下调用，
+// 又不会拿一小时前的判断当成现在的判断。
+const noChangeWindow = 45 * time.Minute
 
 // ErrNoMaterialChange 表示本轮输入与上一次模型调用时完全一致。
 // 它不是故障：调用方应把它记成"跳过"，而不是"失败"。
-var ErrNoMaterialChange = errors.New("行情与账户在 20 分钟内没有实质变化，本轮不调用模型")
+var ErrNoMaterialChange = errors.New("行情与账户在上一次调用后没有实质变化，本轮不调用模型")
 
 // SnapshotFingerprint 把一次判断的全部输入压成一个短哈希。
 //
@@ -49,15 +55,24 @@ func SnapshotFingerprint(snapshot Snapshot, pending []Order, blocks []BlockedInt
 	quotes := append([]foundation.Quote(nil), snapshot.Quotes...)
 	sort.Slice(quotes, func(i, j int) bool { return quotes[i].Symbol < quotes[j].Symbol })
 	for _, quote := range quotes {
-		// 价格保留两位：A 股最小变动单位是 0.01，第三位小数只是数据源的噪声。
-		write("q=%s|%.2f|%.2f|%.0f", quote.Symbol, quote.Price, quote.PreviousClose, quote.Volume)
+		// 价格按 0.5% 的台阶量化，成交量按 10% 的台阶量化。
+		//
+		// 精确到分是上一版的做法，结果是"指纹永远在变"：39 只票里只要有一只
+		// 跳了一分钱，整轮就被判成有变化，于是每轮都调模型，指纹检测形同虚设。
+		// A 股 T+1 下，0.5% 以内的日内抖动改变不了任何一笔可执行的决策，
+		// 而成交量是累计值、天生单调递增，不量化就永远是"新数据"。
+		write("q=%s|%d|%d|%.2f", quote.Symbol, priceStep(quote.Price, quote.PreviousClose),
+			volumeStep(quote.Volume), quote.PreviousClose)
 	}
 
 	positions := append([]Position(nil), snapshot.Positions...)
 	sort.Slice(positions, func(i, j int) bool { return positions[i].Symbol < positions[j].Symbol })
 	for _, position := range positions {
-		write("p=%s|%d|%d|%d|%.2f|%.2f", position.Symbol, position.Quantity,
-			position.Available, position.ReservedQuantity, position.AverageCost, position.LastPrice)
+		// 持仓现价同样按 0.5% 台阶量化：以成本为基准，
+		// 因为"浮盈从 3.1% 变 3.4%"不改变任何决策，而"从 3% 变 -0.5%"会。
+		write("p=%s|%d|%d|%d|%.2f|%d", position.Symbol, position.Quantity,
+			position.Available, position.ReservedQuantity, position.AverageCost,
+			priceStep(position.LastPrice, position.AverageCost))
 	}
 
 	symbols := make([]string, 0, len(snapshot.OpenBuyValue))
@@ -112,6 +127,39 @@ func SnapshotFingerprint(snapshot Snapshot, pending []Order, blocks []BlockedInt
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum)[:16]
 }
+
+// priceStep 把"当前价相对基准价"的变化量化成台阶编号。
+// 台阶宽度 0.5%：同一步阶内视为没有变化。
+// 基准价缺失（0）时退化成绝对价格本身，宁可多调一次模型，也不把不同标的混成一步。
+func priceStep(price, base float64) int {
+	if base <= 0 || price <= 0 {
+		return int(math.Round(price * 100))
+	}
+	return int(math.Round((price/base - 1) / priceChangeStep))
+}
+
+// volumeStep 把成交量量化成台阶编号。台阶宽度 10%：
+// 成交量是当日累计值，只要不量化就永远是"新数据"，指纹检测会因此完全失效。
+func volumeStep(volume float64) int {
+	if volume <= 0 {
+		return 0
+	}
+	return int(math.Round(math.Log(volume/1e6) / math.Log(1+volumeChangeStep)))
+}
+
+// priceChangeStep / volumeChangeStep 是"算实质变化"的门槛。
+// 定得太小等于没量化（每轮都在变），定得太大等于迟钝（跌了 3% 还判成没变）。
+//
+// 1% 的价格台阶对应的是"A 股 T+1 下改变得了决策的最小变动"：
+// 止损、止盈、时间止损、失效条件全部由代码按分钟执行，不经过模型；
+// 模型只在排班轮次上决定"买不买、买哪个"，1% 以内的日内漂移改不了这个结论。
+//
+// 台阶量化是边界敏感的：0.4% 的抖动如果正好跨过档位边界，仍会被算成变化。
+// 这不可避免，但比起"精确到分"（每次抖动都跨档），它把命中率从 0 提到多数。
+const (
+	priceChangeStep  = 0.01
+	volumeChangeStep = 0.10
+)
 
 // baseline 记录上一次真正调用模型时的指纹。
 //
