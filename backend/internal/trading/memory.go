@@ -107,7 +107,20 @@ type MemoryQuery struct {
 // SyncMemories 把还没有记忆的平仓记录补齐，返回新增条数。
 //
 // 幂等：已存在的 trade_id 直接跳过。复盘每天跑一次，重复调用只会得到 0。
+// 每次先做一次便宜的差集计数：没有待补的平仓记录时直接返回，
+// 这样自动驾驶每轮调用它也不会有任何代价。
 func (s *Store) SyncMemories(ctx context.Context, accountID string) (int, error) {
+	var pending int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM trading_closed_trades t
+		 WHERE t.account_id=? AND NOT EXISTS (
+		     SELECT 1 FROM trading_memory m WHERE m.account_id=t.account_id AND m.trade_id=t.id)`,
+		accountID).Scan(&pending); err != nil {
+		return 0, err
+	}
+	if pending == 0 {
+		return 0, nil
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT content_json FROM trading_closed_trades WHERE account_id=?`, accountID)
 	if err != nil {
 		return 0, err

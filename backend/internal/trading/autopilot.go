@@ -191,6 +191,14 @@ func (a *Autopilot) tick() {
 	// 自愈对账同样放在开关之前：账本正确性与"今天要不要买"无关。
 	// 自动驾驶关着的时候账记错了，一样是错的。
 	a.healLedger(ctx, accountID, now)
+	// 平仓记忆补齐同样放在开关之前：记忆是校准与提示词的原料，
+	// 平仓后立即入账，下一轮模型就能看到"上一次类似情境的结果"，
+	// 而不是等到当天复盘。无新平仓时这次调用是零成本的差集计数。
+	if added, syncErr := a.service.SyncMemories(ctx, accountID); syncErr != nil {
+		a.logf("event=autopilot_memory_sync_failed err=%v", syncErr)
+	} else if added > 0 {
+		a.logf("event=autopilot_memory_synced added=%d", added)
+	}
 
 	config, err := a.store.GetAutopilotConfig(ctx, accountID)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -486,6 +487,21 @@ func NewServer(config any) *Server {
 	s.tradingStore = cfg.TradingStore
 	if s.tradingStore != nil {
 		s.trading = trading.NewService(cfg.TradingStore, usageGateway, s.realtimeProvider, s.stockDirectory, cfg.Logger)
+		// 实盘通道门控：地址与令牌齐全才启用，缺任何一项都留在模拟盘并明确记日志。
+		// fail-closed——半套配置比没有配置危险，它让人以为实盘已经接好。
+		if endpoint := strings.TrimSpace(os.Getenv("A_STOCK_TRADING_BROKER_ENDPOINT")); endpoint != "" {
+			liveConfig := trading.LiveBrokerConfig{
+				Endpoint: endpoint,
+				Token:    os.Getenv("A_STOCK_TRADING_BROKER_TOKEN"),
+			}
+			if liveBroker, err := trading.NewLiveBroker(liveConfig); err != nil {
+				startupErrors = append(startupErrors, fmt.Errorf("enable live trading broker: %w", err))
+				s.logger.Printf("level=error event=trading_live_broker_disabled error=%q note=实盘通道配置不完整，继续使用模拟盘", err.Error())
+			} else {
+				s.trading.SetBroker(liveBroker)
+				s.logger.Printf("level=warn event=trading_live_broker_enabled endpoint=%s note=实盘通道已启用，本页操作会真实下单", endpoint)
+			}
+		}
 		// 板块资金流是可选能力：行情总览服务碰巧实现了它就直接接上，
 		// 没实现也不影响交易，只是模型查不到资金流。
 		if flow, ok := s.marketOverview.(trading.SectorFlowProvider); ok && flow != nil {

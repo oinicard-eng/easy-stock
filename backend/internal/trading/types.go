@@ -257,10 +257,10 @@ type Order struct {
 	// EntryRegime 是下单时的市场状态，成交后原样写进持仓。
 	// 在订单上而不是仅在计划上：持仓要能独立回答"建仓时的环境"，
 	// 而计划的生命周期比持仓短得多。
-	EntryRegime string  `json:"entry_regime,omitempty"`
-	Confidence  float64 `json:"confidence,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	EntryRegime string    `json:"entry_regime,omitempty"`
+	Confidence  float64   `json:"confidence,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // IsOpen 表示该订单仍可能占用资金与可卖数量。
@@ -314,9 +314,9 @@ type Snapshot struct {
 	// 为什么放在快照里而不是议决时现取：沙盘要用同一份输入重放，
 	// 现取会拿今天的波动率去重算上周的计划，差异里就混进了"时间变化"。
 	// 它不进变化检测指纹——ATR 每天都在变，算进去会让安静模式永不生效。
-	ATRs map[string]float64 `json:"atrs,omitempty"`
-	Universe        []string           `json:"universe"`
-	MissingQuotes   []string           `json:"missing_quotes,omitempty"`
+	ATRs          map[string]float64 `json:"atrs,omitempty"`
+	Universe      []string           `json:"universe"`
+	MissingQuotes []string           `json:"missing_quotes,omitempty"`
 	// Market 是本轮对市场状态的判断。未评估时 Evaluated 为 false，
 	// 与"评估了但样本不足（unknown）"是两件事：前者不限制交易，后者必须禁止开仓。
 	Market cognition.MarketView `json:"market"`

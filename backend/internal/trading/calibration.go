@@ -32,7 +32,7 @@ const calibrationMemoryLimit = 500
 
 // ConfidenceBucket 是一个置信度分桶的统计结果。
 type ConfidenceBucket struct {
-	Label string `json:"label"`
+	Label string  `json:"label"`
 	Lower float64 `json:"lower"`
 	Upper float64 `json:"upper"`
 	// Samples 只统计有置信度且结果为 win/loss 的样本。
@@ -59,7 +59,7 @@ type CalibrationReport struct {
 	Flats   int `json:"flats"`
 	Missing int `json:"missing"`
 	// Brier 是均方误差，0 完美、0.25 等于"永远猜 50%"。
-	Brier   float64 `json:"brier"`
+	Brier   float64            `json:"brier"`
 	Buckets []ConfidenceBucket `json:"buckets"`
 	// Verdict 是一句可直接进提示词的中文结论。
 	Verdict     string    `json:"verdict"`
@@ -115,7 +115,7 @@ func buildCalibration(accountID string, memories []Memory, now time.Time) Calibr
 	report := CalibrationReport{AccountID: accountID, GeneratedAt: now}
 	type acc struct {
 		samples, wins, losses, flats int
-		confSum, pnlSum             float64
+		confSum, pnlSum              float64
 	}
 	accumulators := make([]acc, len(calibrationBuckets))
 	brierSum := 0.0

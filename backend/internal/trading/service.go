@@ -311,6 +311,16 @@ func (s *Service) BrokerName() string {
 	return s.broker.Name()
 }
 
+// SetBroker 替换执行通道，供启动装配实盘适配器使用。
+// 只允许在服务开始处理请求前调用（httpapi 装配阶段），运行中换通道
+// 会让"挂单属于哪个通道"失去单一事实来源。
+func (s *Service) SetBroker(broker Broker) {
+	if broker == nil {
+		return
+	}
+	s.broker = broker
+}
+
 // RulesForProfile 把交易者画像映射为确定性风控阈值。画像只影响阈值，不影响数据来源。
 func RulesForProfile(profile string) RiskRules {
 	rules := DefaultRiskRules()
@@ -925,6 +935,14 @@ func (s *Service) match(ctx context.Context, account Account, position Position,
 	if s.quotes == nil {
 		return order, errors.New("行情服务未配置")
 	}
+	// 已有通道单号的委托不再重新提交：那会在券商侧变成第二笔委托。
+	// 它的状态只能靠对账拿回来——这是实盘通道与模拟盘最本质的区别，
+	// 模拟盘"重新撮合一遍"的语义在这里等于重复下单。
+	if order.ChannelOrderID != "" {
+		if query, ok := s.broker.(QueryChannel); ok {
+			return s.reconcileChannelOrder(ctx, query, order)
+		}
+	}
 	quoteCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	quotes, err := s.quotes.Realtime(quoteCtx, []string{order.Symbol})
@@ -956,6 +974,11 @@ func (s *Service) match(ctx context.Context, account Account, position Position,
 	if err != nil {
 		return order, err
 	}
+	// 受理成功时必须先把通道单号写进订单再落库：
+	// 后续对账与撤单全靠它定位券商侧委托，丢了就只能去券商后台人肉对。
+	if result.ChannelOrderID != "" {
+		order.ChannelOrderID = result.ChannelOrderID
+	}
 	switch result.Status {
 	case OrderStatusFilled, OrderStatusPartial:
 		remaining := order.Quantity - order.FilledQuantity
@@ -980,6 +1003,85 @@ func (s *Service) match(ctx context.Context, account Account, position Position,
 		return order, err
 	}
 	return order, nil
+}
+
+// reconcileChannelOrder 用通道回报更新一笔已受理委托的本地状态。
+//
+// 券商回报的 filled_quantity 是累计值，本地增量 = 累计 − 已记。
+// 这样重复轮询、回报乱序、重发都安全——真实链路里这三件事每天都会发生。
+func (s *Service) reconcileChannelOrder(ctx context.Context, query QueryChannel, order Order) (Order, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	result, err := query.Query(queryCtx, order.ChannelOrderID)
+	if err != nil {
+		// 查不到就保持现状：本地状态与券商侧不一致时，
+		// 保留挂起比猜测一个状态安全得多，下一轮继续对。
+		return order, err
+	}
+	switch result.Status {
+	case OrderStatusFilled, OrderStatusPartial:
+		quantity := result.FilledQuantity - order.FilledQuantity
+		if quantity <= 0 {
+			// 没有新增成交：状态不动，只刷新时间，避免重复 ApplyFill 凭空加仓。
+			if result.Status == OrderStatusFilled && order.FilledQuantity >= order.Quantity {
+				order.Status = OrderStatusFilled
+				order.UpdatedAt = time.Now().UTC()
+				if err := s.store.UpdateOrder(ctx, order); err != nil {
+					return order, err
+				}
+			}
+			return order, nil
+		}
+		if quantity > order.Quantity-order.FilledQuantity {
+			quantity = order.Quantity - order.FilledQuantity
+		}
+		filled, err := s.store.ApplyFill(ctx, order, quantity, result.Price, result.Fee)
+		if err != nil {
+			return order, err
+		}
+		s.logf("event=trading_channel_fill order=%s channel=%s qty=%d price=%.2f",
+			order.ID, order.ChannelOrderID, quantity, result.Price)
+		return filled, nil
+	case OrderStatusRejected, OrderStatusCancelled:
+		// 券商侧终态：先把尚未入账的成交补记（撤单前可能已成交一部分），
+		// 再把剩余部分按券商终态收口。直接改状态会丢掉那部分成交的账。
+		if increment := result.FilledQuantity - order.FilledQuantity; increment > 0 {
+			price := result.Price
+			if price <= 0 {
+				price = order.LimitPrice
+			}
+			if price > 0 {
+				var err error
+				order, err = s.store.ApplyFill(ctx, order, increment, price, result.Fee)
+				if err != nil {
+					return order, err
+				}
+			}
+		}
+		if order.IsOpen() {
+			reason := firstNonEmpty(result.Reason, map[string]string{
+				string(OrderStatusRejected):  "券商拒绝该笔委托",
+				string(OrderStatusCancelled): "券商侧已撤销",
+			}[string(result.Status)])
+			closed, changed, err := s.store.CloseOrder(ctx, order.ID, result.Status, reason)
+			if err != nil {
+				return order, err
+			}
+			if !changed {
+				return s.store.GetOrder(ctx, order.ID)
+			}
+			return closed, nil
+		}
+		return order, nil
+	default: // pending
+		order.Status = OrderStatusPending
+		order.RejectReason = result.Reason
+		order.UpdatedAt = time.Now().UTC()
+		if err := s.store.UpdateOrder(ctx, order); err != nil {
+			return order, err
+		}
+		return order, nil
+	}
 }
 
 func (s *Service) CancelOrder(ctx context.Context, orderID string) (Order, error) {

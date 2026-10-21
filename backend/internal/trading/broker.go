@@ -37,6 +37,10 @@ type BrokerResult struct {
 	Price          float64
 	Fee            float64
 	Reason         string
+	// ChannelOrderID 是券商侧委托号。异步通道受理成功时返回，
+	// 服务层写回订单后，后续对账与撤单都靠它定位券商侧的委托。
+	// 为空表示本笔委托没有券商侧形态（模拟盘）。
+	ChannelOrderID string
 }
 
 type Broker interface {

@@ -14,11 +14,11 @@ func TestGuardTrailParamsScaleWithATR(t *testing.T) {
 		wantArm      float64
 		wantDistance float64
 	}{
-		{0, 4, 6},      // 没有 ATR：退回配置值，不猜
-		{1, 2, 3},      // 下限：1.5×1=1.5 → 2；2.5×1=2.5 → 3
-		{3, 4.5, 7.5},  // 正常区间
-		{6, 8, 12},     // 上限：9 → 8；15 → 12
-		{0.5, 2, 3},    // 极低波动仍保底
+		{0, 4, 6},     // 没有 ATR：退回配置值，不猜
+		{1, 2, 3},     // 下限：1.5×1=1.5 → 2；2.5×1=2.5 → 3
+		{3, 4.5, 7.5}, // 正常区间
+		{6, 8, 12},    // 上限：9 → 8；15 → 12
+		{0.5, 2, 3},   // 极低波动仍保底
 	}
 	for _, item := range cases {
 		arm, distance := guardTrailParams(DefaultGuardConfig(), item.atrPercent)

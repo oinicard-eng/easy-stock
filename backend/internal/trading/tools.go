@@ -86,8 +86,8 @@ type Toolbox struct {
 	// emotion 是市场情绪周期（人气阶段）。它回答"现在市场冷不冷"，
 	// 与 marketIntel 的指数涨跌是两个维度：指数可能微涨而人气已在退潮。
 	emotion EmotionProvider
-	news        NewsSearchProvider
-	now         time.Time
+	news    NewsSearchProvider
+	now     time.Time
 }
 
 const (
