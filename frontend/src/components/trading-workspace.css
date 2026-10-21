@@ -1,9 +1,89 @@
+/* AI 交易员：左侧功能导航 + 右侧视图区，与行情总览同一套桌面信息架构。 */
 .trading-workspace {
 	display: grid;
-	gap: 16px;
-	padding: 4px 0 28px;
+	grid-template-columns: 226px minmax(0, 1fr);
+	min-height: calc(100vh - 154px);
+	max-width: 1840px;
+	margin: 0 auto;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+	box-shadow: 0 10px 30px var(--theme-shadow, rgba(29, 51, 77, .07));
+	overflow: hidden;
 	color: var(--text);
 }
+
+.trading-nav {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	padding: 12px;
+	border-right: 1px solid var(--line);
+	background: linear-gradient(180deg, var(--theme-surface-soft, #f8fafc), var(--theme-surface-soft, #f2f6fa));
+}
+
+.trading-nav > header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 48px;
+	padding: 0 8px 12px;
+	border-bottom: 1px solid var(--line-soft);
+	color: var(--theme-amber, #b9770e);
+}
+
+.trading-nav > header > div { display: grid; gap: 6px; }
+.trading-nav > header span { color: var(--theme-muted, #718096); font-size: var(--fs-caption); font-weight: 700; letter-spacing: var(--tracking-eyebrow); }
+.trading-nav > header strong { color: var(--theme-text, #26384e); font-size: var(--fs-body); }
+.trading-nav > section { margin-top: 12px; }
+.trading-nav h2 { margin: 0 8px 6px; color: var(--theme-muted, #718096); font-size: var(--fs-caption); font-weight: 700; letter-spacing: 0.01em; }
+.trading-nav > section > div { display: grid; gap: 3px; }
+
+.trading-nav button {
+	display: grid;
+	grid-template-columns: 22px minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-height: 45px;
+	padding: 8px;
+	border: 1px solid transparent;
+	border-radius: 8px;
+	background: transparent;
+	color: var(--theme-muted, #78889b);
+	text-align: left;
+	cursor: pointer;
+}
+
+.trading-nav button:hover { background: var(--theme-surface, #fff); color: var(--theme-muted, #3f5f80); }
+.trading-nav button.active { border-color: var(--theme-amber-line, #7d6840); background: var(--theme-surface, #fff); color: var(--theme-amber, #b9770e); box-shadow: 0 5px 14px var(--theme-shadow, rgba(39, 89, 139, .08)); }
+.trading-nav button > span { display: grid; gap: 2px; min-width: 0; }
+.trading-nav button strong { color: var(--theme-text, #34465b); font-size: var(--fs-body); }
+.trading-nav button small { color: var(--theme-subtle, #8a96a5); font-size: var(--fs-desc); line-height: var(--lh-snug); overflow-wrap: anywhere; white-space: normal; }
+.trading-nav button.active strong { color: var(--theme-text, #26384e); }
+.trading-nav button em { padding: 2px 6px; border-radius: 999px; background: var(--theme-surface-soft, #edf1f5); color: var(--theme-subtle, #8a96a5); font-size: var(--fs-desc); font-style: normal; white-space: nowrap; }
+.trading-nav button.active em { background: var(--theme-amber-soft, #fffaf0); color: var(--theme-amber, #b9770e); }
+
+.trading-nav-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; padding: 12px 8px 2px; border-top: 1px solid var(--line-soft); color: var(--theme-subtle, #8a96a5); font-size: var(--fs-desc); }
+.trading-gate-dot { width: 8px; height: 8px; border-radius: 50%; background: #2f9e6f; flex-shrink: 0; }
+.trading-gate-dot.pause { background: #edc36e; }
+.trading-gate-dot.halt { background: #d64545; }
+
+.trading-main {
+	display: grid;
+	gap: 16px;
+	align-content: start;
+	min-width: 0;
+	padding: 16px 18px 28px;
+	background: var(--theme-surface-soft, #f7f9fc);
+}
+
+.trading-hero { display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 56px; padding: 0 4px; }
+.trading-hero > div:first-child { display: grid; gap: 4px; }
+.trading-hero > div:first-child > span { color: var(--theme-amber, #b9770e); font-size: var(--fs-caption); font-weight: 700; letter-spacing: var(--tracking-eyebrow); }
+.trading-hero h2 { margin: 0; color: var(--theme-text, #1f3045); font-size: var(--fs-title); }
+.trading-hero p { margin: 0; color: var(--theme-muted, #788697); font-size: var(--fs-body); }
+.trading-hero-side { display: flex; align-items: center; gap: 8px; }
 
 .trading-banner {
 	display: flex;
@@ -477,6 +557,14 @@
 @media (max-width: 1100px) {
 	.trading-grid { grid-template-columns: 1fr; }
 	.trading-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.trading-workspace { grid-template-columns: 205px minmax(0, 1fr); }
+}
+
+@media (max-width: 900px) {
+	.trading-workspace { grid-template-columns: 1fr; }
+	.trading-nav { border-right: none; border-bottom: 1px solid var(--line); }
+	.trading-nav > section { margin-top: 8px; }
+	.trading-nav-foot { margin-top: 8px; }
 }
 
 @media (max-width: 620px) {
@@ -1465,3 +1553,95 @@
 }
 .trading-calibration td.up { color: var(--up, #d64545); }
 .trading-calibration td.down { color: var(--down, #2f9e6f); }
+
+/* 状态条：自动运行、市场环境、健康、门控。四块等高，点击直达对应模块。 */
+.trading-status-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+
+.trading-status-tile {
+	display: grid;
+	gap: 3px;
+	min-width: 0;
+	padding: 12px 14px;
+	border: 1px solid var(--line);
+	border-left-width: 3px;
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+	text-align: left;
+	cursor: pointer;
+}
+.trading-status-tile:hover { border-color: var(--theme-blue-line, #9fbfe0); }
+.trading-status-tile > span { color: var(--theme-muted, #78889b); font-size: var(--fs-caption); }
+.trading-status-tile > strong { color: var(--theme-text, #26384e); font-size: var(--fs-title); line-height: var(--lh-tight); }
+.trading-status-tile > em { color: var(--theme-subtle, #8a96a5); font-size: var(--fs-desc); font-style: normal; }
+.trading-status-tile.ok { border-left-color: #2f9e6f; }
+.trading-status-tile.warn { border-left-color: #edc36e; }
+.trading-status-tile.bad { border-left-color: #d64545; }
+.trading-status-tile.idle { border-left-color: var(--line); }
+.trading-status-tile.idle > strong { color: var(--theme-subtle, #8a96a5); }
+
+/* 待办：把需要人决策的状态收拢到一处，每条都能直接跳到处理位置。 */
+.trading-attention {
+	display: grid;
+	gap: 10px;
+	padding: 14px 16px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--theme-surface, #fff);
+}
+.trading-attention > header { display: flex; align-items: center; gap: 8px; }
+.trading-attention > header svg { color: var(--amber, #b9770e); flex-shrink: 0; }
+.trading-attention > header h2 { margin: 0; color: var(--theme-text, #26384e); font-size: var(--fs-body); }
+.trading-attention > header .trading-subtle { margin-left: auto; }
+.trading-attention > p { margin: 0; }
+.trading-attention ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.trading-attention li {
+	display: grid;
+	grid-template-columns: 8px minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: var(--theme-surface-soft, #f7f9fc);
+}
+.trading-attention li > i { width: 8px; height: 8px; border-radius: 50%; background: #2f9e6f; }
+.trading-attention li.info > i { background: #2476d2; }
+.trading-attention li.warn > i { background: #edc36e; }
+.trading-attention li.danger > i { background: #d64545; }
+.trading-attention li > span { color: var(--theme-text, #34465b); font-size: var(--fs-small); min-width: 0; }
+
+/* 四步流程：planning 视图顶部，说明「这张页面按什么顺序用」。 */
+.trading-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.trading-steps > div {
+	display: grid;
+	grid-template-columns: 22px minmax(0, 1fr);
+	align-items: start;
+	gap: 8px;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--theme-surface, #fff);
+}
+.trading-steps i {
+	display: grid;
+	place-items: center;
+	width: 22px;
+	height: 22px;
+	border-radius: 50%;
+	background: var(--theme-amber-soft, #fffaf0);
+	color: var(--theme-amber, #b9770e);
+	font-size: var(--fs-desc);
+	font-style: normal;
+	font-weight: 700;
+}
+.trading-steps span { display: grid; gap: 2px; min-width: 0; }
+.trading-steps strong { color: var(--theme-text, #26384e); font-size: var(--fs-small); }
+.trading-steps small { color: var(--theme-subtle, #8a96a5); font-size: var(--fs-desc); line-height: var(--lh-snug); }
+
+@media (max-width: 1240px) {
+	.trading-status-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.trading-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+	.trading-status-strip, .trading-steps { grid-template-columns: 1fr; }
+}

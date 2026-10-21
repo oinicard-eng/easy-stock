@@ -115,7 +115,7 @@ export function App() {
 		if (window.location.hash === '#reviews') return 'reviews';
 		if (window.location.hash === '#stock-ai') return 'stock-ai';
 		if (window.location.hash === '#portfolio-inspection') return 'portfolio-inspection';
-		if (window.location.hash === '#trading') return 'trading';
+		if (window.location.hash === '#trading' || window.location.hash.startsWith('#trading/')) return 'trading';
 		if (window.location.hash === '#ai') return 'ai';
 		if (window.location.hash.startsWith('#market')) return 'market';
 		if (/^#sector-flow(?:[?&]|$)/.test(window.location.hash)) return 'market';

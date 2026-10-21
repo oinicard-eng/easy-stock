@@ -21,6 +21,7 @@ import {
 	Sparkles,
 	Target,
 	Timer,
+	TrendingUp,
 	Wallet,
 	XCircle,
 } from 'lucide-react';
@@ -102,6 +103,13 @@ import {
 	type TradeResearch,
 	type TradeReview,
 } from '../lib/trading';
+import {
+	findTradingGroupName,
+	findTradingModule,
+	resolveTradingView,
+	tradingNavGroups,
+	type TradingView,
+} from '../lib/trading-nav';
 import './trading-workspace.css';
 
 type Props = {
@@ -116,6 +124,21 @@ const profileOptions = [
 ];
 
 const horizonOptions = ['1 个交易日', '1-3 个交易日', '一周以内'];
+
+// 左侧导航每个视图的图标，与行情总览同一套视觉语言。
+const tradingModuleIcons = {
+	overview: Gauge,
+	market: Activity,
+	planning: Sparkles,
+	positions: Wallet,
+	plans: History,
+	autopilot: PowerCircle,
+	timeline: CalendarClock,
+	performance: GitCompareArrows,
+	review: Compass,
+	memory: Brain,
+	ops: ShieldCheck,
+} satisfies Record<TradingView, typeof Gauge>;
 
 function parseWatchlist(text: string): string[] {
 	return text
@@ -651,6 +674,29 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 	// 与 Lesson 的聚合统计不同，它保留单笔情境，是模型"回忆"的原料。
 	const [memories, setMemories] = useState<TradeMemory[]>([]);
 	const [memoryBusy, setMemoryBusy] = useState(false);
+	// 左侧导航视图：hash 形如 #trading/<view>，刷新页面后停留在原视图。
+	const [activeView, setActiveView] = useState<TradingView>(() => resolveTradingView(window.location.hash));
+
+	useEffect(() => {
+		const onHashChange = () => {
+			if (window.location.hash.startsWith('#trading')) setActiveView(resolveTradingView(window.location.hash));
+		};
+		window.addEventListener('hashchange', onHashChange);
+		return () => window.removeEventListener('hashchange', onHashChange);
+	}, []);
+
+	const selectTradingView = (view: TradingView) => {
+		setActiveView(view);
+		window.history.replaceState(null, '', `#trading/${view}`);
+	};
+
+	const activeTradingModule = findTradingModule(activeView);
+	const gateTone = account?.control.kill_switch ? 'halt' : account?.control.pause_buying ? 'pause' : 'normal';
+	const refreshTradingData = () => {
+		void loadAccount();
+		void loadBoard();
+		void loadPlans();
+	};
 
 	const loadAccount = useCallback(
 		async (signal?: AbortSignal) => {
@@ -1207,7 +1253,8 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 	const unrealized = useMemo(() => {
 		if (!account) return 0;
 		return account.positions.reduce((total, position) => total + position.unrealized_pnl, 0);
-	}, [account]);	const returnPercent = useMemo(() => {
+	}, [account]);
+	const returnPercent = useMemo(() => {
 		if (!account || account.account.initial_cash <= 0) return 0;
 		return ((account.account.equity - account.account.initial_cash) / account.account.initial_cash) * 100;
 	}, [account]);
@@ -1218,456 +1265,630 @@ function TradingWorkspaceInner({ config, onOpenSettings }: Props) {
 	const rejectedOrders = activeOrders.filter((order) => order.status === 'rejected');
 	const pendingOrders = activeOrders.filter((order) => order.status === 'pending');
 
+	// 左侧导航的实时标记：不点进去也知道哪里有东西等着看。
+	const navBadges: Partial<Record<TradingView, string>> = {
+		positions: account?.positions?.length ? String(account.positions.length) : '',
+		planning: active?.status === 'draft' && actionableOrders.length > 0 ? `待确认 ${actionableOrders.length}` : '',
+		autopilot: autopilot ? (autopilot.running ? '运行中' : '已停止') : '',
+		ops: health && health.status !== 'healthy' ? '异常' : '',
+	};
+
+	// 「需要你处理」：把散落在各面板里、真正需要人决策的状态收拢到一处。
+	// 不熟悉模块的人不应该靠逐个点开才能发现熔断、账本不平或告警没配。
+	const attention: { tone: 'info' | 'warn' | 'danger'; text: string; view: TradingView; action: string }[] = [];
+	if (autopilot?.today.breaker || autopilot?.breakers.some((item) => item.tripped)) {
+		attention.push({ tone: 'danger', text: '风控熔断已触发，本轮不会开新仓', view: 'autopilot', action: '看运行控制' });
+	}
+	if (autopilot?.risk?.level === 'drawdown.stop') {
+		attention.push({ tone: 'danger', text: `回撤 ${autopilot.risk.drawdown_percent.toFixed(2)}% 已到停止档`, view: 'autopilot', action: '释放回撤' });
+	} else if (autopilot?.risk?.level === 'drawdown.warn') {
+		attention.push({ tone: 'warn', text: `回撤 ${autopilot.risk.drawdown_percent.toFixed(2)}% 进入警戒档`, view: 'autopilot', action: '看运行控制' });
+	}
+	if (active?.status === 'draft' && actionableOrders.length > 0) {
+		attention.push({ tone: 'info', text: `有 1 份待确认计划，${actionableOrders.length} 笔可执行`, view: 'planning', action: '去确认' });
+	}
+	if (pendingOrders.length > 0) {
+		attention.push({ tone: 'info', text: `${pendingOrders.length} 笔挂单等待限价触及`, view: 'positions', action: '看挂单' });
+	}
+	if (account?.account.pnl && !account.account.pnl.aligned) {
+		attention.push({ tone: 'warn', text: `盈亏口径未对齐，残差 ${signedMoney(account.account.pnl.residual)}`, view: 'overview', action: '看口径' });
+	}
+	if (health && !health.ledger.ok) {
+		attention.push({ tone: 'danger', text: '账本不平：资金或冻结数量存在漂移', view: 'ops', action: '去对账' });
+	}
+	if (health?.alerts && !health.alerts.configured) {
+		attention.push({ tone: 'warn', text: '未配置告警通道，出事没有人能收到通知', view: 'ops', action: '去配置' });
+	}
+	if (health?.alerts && health.alerts.failed_24h > 0) {
+		attention.push({ tone: 'warn', text: `24 小时内 ${health.alerts.failed_24h} 条告警投递失败`, view: 'ops', action: '查通道' });
+	}
+	if (autopilot && !autopilot.running) {
+		attention.push({ tone: 'info', text: '自动运行未开启，只能手动生成并确认计划', view: 'autopilot', action: '去开启' });
+	}
+
 	if (!config) {
 		return <section className="trading-workspace"><p className="trading-empty">等待后端连接…</p></section>;
 	}
 
 	return (
 		<section className="trading-workspace">
-			<div className="trading-banner">
-				<ShieldAlert size={18} />
-				<div>
-					<strong>这是模拟盘，不接券商、不会产生真实委托。</strong>
-					<span>
-						模型只负责给出方向与权重，股数、费用、涨跌停与风控校验全部由本机代码计算；所有计划需你确认后才会进入模拟撮合。
-					</span>
-				</div>
-			</div>
+			<aside className="trading-nav" aria-label="AI交易员功能">
+				<header><TrendingUp size={18} /><div><span>TRADING AGENT</span><strong>AI交易员</strong></div></header>
+				{tradingNavGroups.map((group) => (
+					<section key={group.id}>
+						<h2>{group.name}</h2>
+						<div>{group.modules.map((module) => {
+							const Icon = tradingModuleIcons[module.id];
+							const badge = navBadges[module.id];
+							return (
+								<button type="button" key={module.id} className={activeView === module.id ? 'active' : ''} onClick={() => selectTradingView(module.id)}>
+									<Icon size={16} />
+									<span><strong>{module.name}</strong><small>{module.description}</small></span>
+									{badge ? <em>{badge}</em> : null}
+								</button>
+							);
+						})}</div>
+					</section>
+				))}
+				<footer className="trading-nav-foot">
+					<i className={`trading-gate-dot ${gateTone}`} aria-hidden="true" />
+					<span>{controlGateText(account?.control)}</span>
+				</footer>
+			</aside>
 
-			<div
-				className={`trading-control ${
-					account?.control.kill_switch ? 'halt' : account?.control.pause_buying ? 'pause' : 'normal'
-				}`}
-			>
-				<div className="trading-control-state">
-					<PowerCircle size={18} />
+			<div className="trading-main">
+				<header className="trading-hero">
 					<div>
-						<strong>{controlGateText(account?.control)}</strong>
+						<span>{findTradingGroupName(activeView)}</span>
+						<h2>{activeTradingModule.name}</h2>
+						<p>{activeTradingModule.description}</p>
+					</div>
+					<div className="trading-hero-side">
+						<button type="button" className="trading-ghost" onClick={refreshTradingData} disabled={loading || boardLoading}>
+							{loading || boardLoading ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} 刷新数据
+						</button>
+					</div>
+				</header>
+
+				<div className="trading-banner">
+					<ShieldAlert size={18} />
+					<div>
+						<strong>这是模拟盘，不接券商、不会产生真实委托。</strong>
 						<span>
-							{account?.control.kill_switch
-								? '不生成新计划，任何挂单都不会成交；已有挂单保留，可撤销。'
-								: account?.control.pause_buying
-									? '只停新增买入，卖出与减仓照常执行。'
-									: '门控放行。全自动执行上线后，这里是唯一的人工总闸。'}
+							模型只负责给出方向与权重，股数、费用、涨跌停与风控校验全部由本机代码计算；所有计划需你确认后才会进入模拟撮合。
 						</span>
 					</div>
 				</div>
-				<div className="trading-control-actions">
-					<button
-						type="button"
-						className={`trading-ghost ${account?.control.pause_buying && !account?.control.kill_switch ? 'active' : ''}`}
-						onClick={() => void handleControl({ pause_buying: !account?.control.pause_buying })}
-						disabled={controlBusy || !account || account.control.kill_switch}
-					>
-						{account?.control.pause_buying && !account?.control.kill_switch ? '恢复买入' : '暂停买入'}
-					</button>
-					<button
-						type="button"
-						className={`trading-ghost ${account?.control.kill_switch ? 'danger active' : 'danger'}`}
-						onClick={() => void handleControl({ kill_switch: !account?.control.kill_switch })}
-						disabled={controlBusy || !account}
-					>
-						{account?.control.kill_switch ? '解除停止' : '全部停止'}
-					</button>
-					<button type="button" className="trading-ghost" onClick={() => void handleReconcile()} disabled={reconciling || !account}>
-						{reconciling ? <LoaderCircle size={14} className="spin" /> : <Scale size={14} />} 对账
-					</button>
-				</div>
-			</div>
 
-			{board?.market?.evaluated ? (
-				<MarketPanel market={board.market} onRefresh={() => void loadBoard()} busy={boardLoading} />
-			) : null}
-
-			<AutopilotPanel
-				status={autopilot}
-				busy={autopilotBusy}
-				cycleBusy={cycleBusy}
-				onConfigure={(patch) => void handleAutopilot(patch)}
-				onRun={() => void handleRunCycle()}
-				onResetBreaker={() => void handleResetBreaker()}
-				onReleaseDrawdown={() => void handleReleaseDrawdown()}
-			/>
-
-			<HealthBar health={health} channel={channel} onRefresh={() => void loadOps()} />
-
-			<div className="trading-summary">
-				<article>
-					<span>总资产</span>
-					<strong>{account ? `¥ ${formatMoney(account.account.equity)}` : '—'}</strong>
-					<em className={returnPercent >= 0 ? 'up' : 'down'}>
-						{account ? `${returnPercent >= 0 ? '+' : ''}${returnPercent.toFixed(2)}%` : '—'}
-					</em>
-				</article>
-				<article>
-					<span>可用资金</span>
-					<strong>{account ? `¥ ${formatMoney(availableCash(account.account))}` : '—'}</strong>
-					<em>
-						{account && account.account.reserved_cash > 0
-							? `挂单冻结 ¥ ${formatMoney(account.account.reserved_cash)}`
-							: `初始 ${account ? `¥ ${formatMoney(account.account.initial_cash)}` : '—'}`}
-					</em>
-				</article>
-				<article>
-					<span>持仓市值</span>
-					<strong>{account ? `¥ ${formatMoney(account.account.market_value)}` : '—'}</strong>
-					<em>{account?.positions?.length ?? 0} 只标的</em>
-				</article>
-				<article>
-					<span>浮动盈亏</span>
-					<strong className={unrealized >= 0 ? 'up' : 'down'}>{`${unrealized >= 0 ? '+' : ''}${formatMoney(unrealized)}`}</strong>
-					<em>
-						{account?.account.pnl
-							? `已实现 ${account.account.pnl.realized >= 0 ? '+' : ''}${formatMoney(account.account.pnl.realized)}`
-							: `账户：${account?.broker === 'paper' ? '模拟撮合' : account?.broker || '—'}`}
-					</em>
-				</article>
-			</div>
-
-			{/* 两个数字口径不同，必须有一行把中间项摆出来。
-			    少了它，"总资产 -630"和"浮动 +672"看上去就是矛盾的。 */}
-			{account?.account.pnl && (
-				<div className={`trading-pnl-check ${account.account.pnl.aligned ? 'ok' : 'warn'}`}>
-					<span>
-						总资产变动 {signedMoney(account.account.pnl.change)} = 已实现 {signedMoney(account.account.pnl.realized)}
-						{' + '}
-						浮动 {signedMoney(account.account.pnl.unrealized)}
-						{account.account.pnl.aligned ? '' : ` + 残差 ${signedMoney(account.account.pnl.residual)}`}
-					</span>
-					<em>累计费用 {formatMoney(account.account.pnl.fees)}（已含在上面两项里，不再单独扣一次）</em>
-					<b>
-						{account.account.pnl.aligned
-							? '对账通过'
-							: `差额 ${signedMoney(account.account.pnl.residual)}（此类差额来自早期建仓成本未计买入费，该口径已修复）`}
-					</b>
-				</div>
-			)}
-
-			{(error || message) && (
-				<div className={`trading-notice ${error ? 'error' : 'ok'}`}>
-					{error ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
-					<span>{error || message}</span>
-					<button type="button" onClick={() => { setError(''); setMessage(''); }}>关闭</button>
-				</div>
-			)}
-
-			<UniversePanel board={board} loading={boardLoading} onRefresh={() => void loadBoard()} />
-
-			<div className="trading-grid">
-				<aside className="trading-panel">
-					<header>
-						<Sparkles size={17} />
-						<h2>生成交易计划</h2>
-						<button type="button" className="trading-ghost" onClick={() => void loadAccount()} disabled={loading}>
-							<RefreshCw size={14} /> 刷新账户
-						</button>
-					</header>
-					<label>
-						<span>关注池（可选，留空则由系统从全市场自动选股）</span>
-						<textarea
-							rows={3}
-							value={watchlist}
-							onChange={(event) => setWatchlist(event.target.value)}
-							placeholder="留空 = 自动选股；也可以填 600000.SH, 000001.SZ 指定标的"
-						/>
-					</label>
-					<div className="trading-form-row">
-						<label>
-							<span>交易者画像</span>
-							<select value={profile} onChange={(event) => setProfile(event.target.value)}>
-								{profileOptions.map((option) => (
-									<option key={option.value} value={option.value}>{option.label}</option>
-								))}
-							</select>
-						</label>
-						<label>
-							<span>计划周期</span>
-							<select value={horizon} onChange={(event) => setHorizon(event.target.value)}>
-								{horizonOptions.map((option) => (
-									<option key={option} value={option}>{option}</option>
-								))}
-							</select>
-						</label>
+				{(error || message) && (
+					<div className={`trading-notice ${error ? 'error' : 'ok'}`}>
+						{error ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
+						<span>{error || message}</span>
+						<button type="button" onClick={() => { setError(''); setMessage(''); }}>关闭</button>
 					</div>
-					<label>
-						<span>补充材料（可选，会作为事实交给模型）</span>
-						<textarea
-							rows={3}
-							value={notes}
-							onChange={(event) => setNotes(event.target.value)}
-							placeholder="例如：今日情绪偏弱，只做低吸；某标的明日有解禁。"
-						/>
-					</label>
-					<button type="button" className="trading-primary" onClick={() => void handleGenerate()} disabled={generating}>
-						{generating ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}
-						{generating ? '模型生成中…' : '生成计划'}
-					</button>
-					<p className="trading-hint">
-						模型只输出方向与目标权重；股数按账户总资产与限价换算，超出风控阈值的建议会被逐条拒绝并给出原因。
-					</p>
-					<button type="button" className="trading-link" onClick={() => void handleReset()}>重置模拟盘资金</button>
-				</aside>
+				)}
 
-				<main className="trading-panel trading-plan">
-					<header>
-						<Wallet size={17} />
-						<h2>计划详情</h2>
-						{active?.snapshot.auto_universe ? (
-							<span className="trading-tag">
-								<Target size={12} /> 系统选股
-							</span>
-						) : null}
-						{active && <span className={`trading-status ${active.status}`}>{tradePlanStatusText[active.status]}</span>}
-						{active && <button type="button" className="trading-ghost" onClick={() => void loadPlans()}><RefreshCw size={14} /> 刷新</button>}
-					</header>
-					{!active ? (
-						<p className="trading-empty">还没有计划。填写关注池后生成第一份模拟盘计划。</p>
-					) : (
-						<>
-							<div className="trading-plan-head">
-								<div>
-									<strong>{active.regime || '未标注市场状态'}</strong>
-									<span>{new Date(active.created_at).toLocaleString('zh-CN')} · {active.trader_profile || '未指定画像'} · {active.horizon || '未指定周期'}</span>
-								</div>
-								<div className="trading-plan-actions">
-									<button type="button" className="trading-primary" onClick={() => void handleExecute()} disabled={executing || active.status !== 'draft' || actionableOrders.length === 0}>
-										{executing ? <LoaderCircle size={15} className="spin" /> : <Play size={15} />}
-										确认执行（{actionableOrders.length}）
-									</button>
-									<button type="button" className="trading-ghost danger" onClick={() => void handleReject()} disabled={active.status !== 'draft'}>
-										<XCircle size={15} /> 放弃
-									</button>
-									<button type="button" className="trading-ghost" onClick={() => void handleMatch()} disabled={matching}>
-										{matching ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} 撮合挂单
-									</button>
-								</div>
-							</div>
-							<p className="trading-plan-summary">{active.summary || active.error || '—'}</p>
-							<ResearchPanel research={active.research} />
-							<DecisionPanel plan={active} />
-							<CooldownBar view={active.snapshot.cooldowns} />
-							<SandboxPanel config={config} plan={active} />
-							{active.risk_notes && active.risk_notes.length > 0 && (
-								<ul className="trading-notes">
-									{active.risk_notes.map((note) => <li key={note}>{note}</li>)}
+				{activeView === 'overview' && (
+					<>
+						{/* 四块状态条：自动运行、市场环境、健康、门控。
+						    它们回答「系统现在在不在工作」，比盈亏更该被先看到。 */}
+						<div className="trading-status-strip">
+							<button type="button" className={`trading-status-tile ${autopilot?.running ? 'ok' : 'idle'}`} onClick={() => selectTradingView('autopilot')}>
+								<span>自动运行</span>
+								<strong>{autopilot ? (autopilot.running ? '运行中' : '已停止') : '—'}</strong>
+								<em>
+									{autopilot
+										? autopilot.running
+											? autopilot.next_run_at
+												? `下一轮 ${clockText(autopilot.next_run_at)}`
+												: `今日已跑 ${autopilot.cycles_today} 轮`
+											: '点此开启自动运行'
+										: '等待读取'}
+								</em>
+							</button>
+							<button type="button" className={`trading-status-tile ${board?.market?.evaluated ? 'ok' : 'idle'}`} onClick={() => selectTradingView('market')}>
+								<span>市场环境</span>
+								<strong>{board?.market?.evaluated ? board.market.label : '未评估'}</strong>
+								<em>{board?.market?.evaluated ? `允许仓位上限 ${board.market.risk_budget_percent}%` : '点此刷新市场判定'}</em>
+							</button>
+							<button type="button" className={`trading-status-tile ${health ? (health.status === 'healthy' ? 'ok' : health.status === 'warning' ? 'warn' : 'bad') : 'idle'}`} onClick={() => selectTradingView('ops')}>
+								<span>健康检查</span>
+								<strong>{health ? healthLabel(health.status) : '—'}</strong>
+								<em>{health ? `${health.positions} 只持仓 · ${health.open_orders} 笔挂单` : '等待读取'}</em>
+							</button>
+							<button type="button" className={`trading-status-tile ${gateTone === 'normal' ? 'ok' : gateTone === 'pause' ? 'warn' : 'bad'}`} onClick={() => selectTradingView('overview')}>
+								<span>交易门控</span>
+								<strong>{controlGateText(account?.control)}</strong>
+								<em>{account?.control.kill_switch ? '不会生成也不成交' : account?.control.pause_buying ? '只停新增买入' : '放行，按规则执行'}</em>
+							</button>
+						</div>
+
+						<section className="trading-attention">
+							<header>
+								<ShieldAlert size={16} />
+								<h2>需要你处理</h2>
+								<span className="trading-subtle">{attention.length ? `${attention.length} 项待办` : '暂无待办'}</span>
+							</header>
+							{attention.length === 0 ? (
+								<p className="trading-subtle">当前没有需要你处理的事项：风控、账本与告警都在正常范围内。</p>
+							) : (
+								<ul>
+									{attention.slice(0, 6).map((item) => (
+										<li key={item.text} className={item.tone}>
+											<i aria-hidden="true" />
+											<span>{item.text}</span>
+											<button type="button" className="trading-link" onClick={() => selectTradingView(item.view)}>{item.action}</button>
+										</li>
+									))}
 								</ul>
 							)}
+						</section>
+
+						<div
+							className={`trading-control ${
+								account?.control.kill_switch ? 'halt' : account?.control.pause_buying ? 'pause' : 'normal'
+							}`}
+						>
+							<div className="trading-control-state">
+								<PowerCircle size={18} />
+								<div>
+									<strong>{controlGateText(account?.control)}</strong>
+									<span>
+										{account?.control.kill_switch
+											? '不生成新计划，任何挂单都不会成交；已有挂单保留，可撤销。'
+											: account?.control.pause_buying
+												? '只停新增买入，卖出与减仓照常执行。'
+												: '门控放行。全自动执行上线后，这里是唯一的人工总闸。'}
+									</span>
+								</div>
+							</div>
+							<div className="trading-control-actions">
+								<button
+									type="button"
+									className={`trading-ghost ${account?.control.pause_buying && !account?.control.kill_switch ? 'active' : ''}`}
+									onClick={() => void handleControl({ pause_buying: !account?.control.pause_buying })}
+									disabled={controlBusy || !account || account.control.kill_switch}
+								>
+									{account?.control.pause_buying && !account?.control.kill_switch ? '恢复买入' : '暂停买入'}
+								</button>
+								<button
+									type="button"
+									className={`trading-ghost ${account?.control.kill_switch ? 'danger active' : 'danger'}`}
+									onClick={() => void handleControl({ kill_switch: !account?.control.kill_switch })}
+									disabled={controlBusy || !account}
+								>
+									{account?.control.kill_switch ? '解除停止' : '全部停止'}
+								</button>
+								<button type="button" className="trading-ghost" onClick={() => void handleReconcile()} disabled={reconciling || !account}>
+									{reconciling ? <LoaderCircle size={14} className="spin" /> : <Scale size={14} />} 对账
+								</button>
+							</div>
+						</div>
+
+						<div className="trading-summary">
+							<article>
+								<span>总资产</span>
+								<strong>{account ? `¥ ${formatMoney(account.account.equity)}` : '—'}</strong>
+								<em className={returnPercent >= 0 ? 'up' : 'down'}>
+									{account ? `${returnPercent >= 0 ? '+' : ''}${returnPercent.toFixed(2)}%` : '—'}
+								</em>
+							</article>
+							<article>
+								<span>可用资金</span>
+								<strong>{account ? `¥ ${formatMoney(availableCash(account.account))}` : '—'}</strong>
+								<em>
+									{account && account.account.reserved_cash > 0
+										? `挂单冻结 ¥ ${formatMoney(account.account.reserved_cash)}`
+										: `初始 ${account ? `¥ ${formatMoney(account.account.initial_cash)}` : '—'}`}
+								</em>
+							</article>
+							<article>
+								<span>持仓市值</span>
+								<strong>{account ? `¥ ${formatMoney(account.account.market_value)}` : '—'}</strong>
+								<em>{account?.positions?.length ?? 0} 只标的</em>
+							</article>
+							<article>
+								<span>浮动盈亏</span>
+								<strong className={unrealized >= 0 ? 'up' : 'down'}>{`${unrealized >= 0 ? '+' : ''}${formatMoney(unrealized)}`}</strong>
+								<em>
+									{account?.account.pnl
+										? `已实现 ${account.account.pnl.realized >= 0 ? '+' : ''}${formatMoney(account.account.pnl.realized)}`
+										: `账户：${account?.broker === 'paper' ? '模拟撮合' : account?.broker || '—'}`}
+								</em>
+							</article>
+						</div>
+
+						{/* 两个数字口径不同，必须有一行把中间项摆出来。
+						    少了它，"总资产 -630"和"浮动 +672"看上去就是矛盾的。 */}
+						{account?.account.pnl && (
+							<div className={`trading-pnl-check ${account.account.pnl.aligned ? 'ok' : 'warn'}`}>
+								<span>
+									总资产变动 {signedMoney(account.account.pnl.change)} = 已实现 {signedMoney(account.account.pnl.realized)}
+									{' + '}
+									浮动 {signedMoney(account.account.pnl.unrealized)}
+									{account.account.pnl.aligned ? '' : ` + 残差 ${signedMoney(account.account.pnl.residual)}`}
+								</span>
+								<em>累计费用 {formatMoney(account.account.pnl.fees)}（已含在上面两项里，不再单独扣一次）</em>
+								<b>
+									{account.account.pnl.aligned
+										? '对账通过'
+										: `差额 ${signedMoney(account.account.pnl.residual)}（此类差额来自早期建仓成本未计买入费，该口径已修复）`}
+								</b>
+							</div>
+						)}
+
+						<HealthBar health={health} channel={channel} onRefresh={() => void loadOps()} />
+					</>
+				)}
+
+				{activeView === 'market' && (board?.market?.evaluated ? (
+					<MarketPanel market={board.market} onRefresh={() => void loadBoard()} busy={boardLoading} />
+				) : (
+					<p className="trading-empty">市场环境尚未加载，点击右上角「刷新数据」。</p>
+				))}
+
+				{activeView === 'planning' && (
+					<>
+						{/* 四步流程写在页面顶上：第一次用这个模块的人不必猜「先生成还是先选股」。 */}
+						<div className="trading-steps">
+							{([
+								['选股范围', watchlist.trim() ? '使用你指定的关注池' : '留空则由系统按位置规则从全市场选'],
+								['生成计划', '模型只给方向与目标权重'],
+								['确认执行', '股数、费用、涨跌停由本机计算'],
+								['撮合挂单', '限价未触及则挂起，可随时撤销'],
+							] as const).map(([name, detail], index) => (
+								<div key={name}><i>{index + 1}</i><span><strong>{name}</strong><small>{detail}</small></span></div>
+							))}
+						</div>
+						<div className="trading-grid">
+						<aside className="trading-panel">
+							<header>
+								<Sparkles size={17} />
+								<h2>生成交易计划</h2>
+								<button type="button" className="trading-ghost" onClick={() => void loadAccount()} disabled={loading}>
+									<RefreshCw size={14} /> 刷新账户
+								</button>
+							</header>
+							<label>
+								<span>关注池（可选，留空则由系统从全市场自动选股）</span>
+								<textarea
+									rows={3}
+									value={watchlist}
+									onChange={(event) => setWatchlist(event.target.value)}
+									placeholder="留空 = 自动选股；也可以填 600000.SH, 000001.SZ 指定标的"
+								/>
+							</label>
+							<div className="trading-form-row">
+								<label>
+									<span>交易者画像</span>
+									<select value={profile} onChange={(event) => setProfile(event.target.value)}>
+										{profileOptions.map((option) => (
+											<option key={option.value} value={option.value}>{option.label}</option>
+										))}
+									</select>
+								</label>
+								<label>
+									<span>计划周期</span>
+									<select value={horizon} onChange={(event) => setHorizon(event.target.value)}>
+										{horizonOptions.map((option) => (
+											<option key={option} value={option}>{option}</option>
+										))}
+									</select>
+								</label>
+							</div>
+							<label>
+								<span>补充材料（可选，会作为事实交给模型）</span>
+								<textarea
+									rows={3}
+									value={notes}
+									onChange={(event) => setNotes(event.target.value)}
+									placeholder="例如：今日情绪偏弱，只做低吸；某标的明日有解禁。"
+								/>
+							</label>
+							<button type="button" className="trading-primary" onClick={() => void handleGenerate()} disabled={generating}>
+								{generating ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}
+								{generating ? '模型生成中…' : '生成计划'}
+							</button>
+							<p className="trading-hint">
+								模型只输出方向与目标权重；股数按账户总资产与限价换算，超出风控阈值的建议会被逐条拒绝并给出原因。
+							</p>
+							<button type="button" className="trading-link" onClick={() => void handleReset()}>重置模拟盘资金</button>
+						</aside>
+
+						<main className="trading-panel trading-plan">
+							<header>
+								<Wallet size={17} />
+								<h2>计划详情</h2>
+								{active?.snapshot.auto_universe ? (
+									<span className="trading-tag">
+										<Target size={12} /> 系统选股
+									</span>
+								) : null}
+								{active && <span className={`trading-status ${active.status}`}>{tradePlanStatusText[active.status]}</span>}
+								{active && <button type="button" className="trading-ghost" onClick={() => void loadPlans()}><RefreshCw size={14} /> 刷新</button>}
+							</header>
+							{!active ? (
+								<p className="trading-empty">还没有计划。填写关注池后生成第一份模拟盘计划。</p>
+							) : (
+								<>
+									<div className="trading-plan-head">
+										<div>
+											<strong>{active.regime || '未标注市场状态'}</strong>
+											<span>{new Date(active.created_at).toLocaleString('zh-CN')} · {active.trader_profile || '未指定画像'} · {active.horizon || '未指定周期'}</span>
+										</div>
+										<div className="trading-plan-actions">
+											<button type="button" className="trading-primary" onClick={() => void handleExecute()} disabled={executing || active.status !== 'draft' || actionableOrders.length === 0}>
+												{executing ? <LoaderCircle size={15} className="spin" /> : <Play size={15} />}
+												确认执行（{actionableOrders.length}）
+											</button>
+											<button type="button" className="trading-ghost danger" onClick={() => void handleReject()} disabled={active.status !== 'draft'}>
+												<XCircle size={15} /> 放弃
+											</button>
+											<button type="button" className="trading-ghost" onClick={() => void handleMatch()} disabled={matching}>
+												{matching ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} 撮合挂单
+											</button>
+										</div>
+									</div>
+									<p className="trading-plan-summary">{active.summary || active.error || '—'}</p>
+									<ResearchPanel research={active.research} />
+									<DecisionPanel plan={active} />
+									<CooldownBar view={active.snapshot.cooldowns} />
+									<SandboxPanel config={config} plan={active} />
+									{active.risk_notes && active.risk_notes.length > 0 && (
+										<ul className="trading-notes">
+											{active.risk_notes.map((note) => <li key={note}>{note}</li>)}
+										</ul>
+									)}
+									<div className="trading-table-wrap">
+										<table className="trading-table">
+											<thead>
+												<tr>
+													<th>标的</th><th>方向</th><th>数量</th><th>限价</th><th>止损</th><th>目标权重</th><th>状态</th><th>依据 / 拒绝原因</th>
+												</tr>
+											</thead>
+											<tbody>
+												{activeOrders.length === 0 && (
+													<tr><td colSpan={8} className="trading-empty-cell">本次没有可执行建议</td></tr>
+												)}
+												{activeOrders.map((order) => (
+													<tr key={order.id} className={order.status}>
+														<td><strong>{order.symbol}</strong><span>{order.name}</span></td>
+														<td className={order.side === 'buy' ? 'up' : 'down'}>{order.side === 'buy' ? '买入' : '卖出'}</td>
+														<td>{order.quantity} 股</td>
+														<td>{order.order_type === 'limit' ? order.limit_price.toFixed(2) : '市价'}</td>
+														<td>{order.stop_loss_price ? order.stop_loss_price.toFixed(2) : '—'}</td>
+														<td>{order.target_weight_percent ? `${order.target_weight_percent.toFixed(1)}%` : '—'}</td>
+														<td><span className={`trading-order-status ${order.status}`}>{tradeOrderStatusText[order.status]}</span></td>
+														<td className="trading-cell-note">{order.status === 'rejected' ? order.reject_reason : order.thesis || '—'}</td>
+													</tr>
+												))}
+											</tbody>
+										</table>
+									</div>
+									{rejectedOrders.length > 0 && (
+										<p className="trading-hint warn">
+											{rejectedOrders.length} 笔建议被风控拒绝，说明模型给出的方向未通过仓位、止损或标的白名单校验，不会进入撮合。
+										</p>
+									)}
+								</>
+							)}
+						</main>
+						</div>
+					</>
+				)}
+
+				{activeView === 'positions' && (
+					<>
+						<section className="trading-panel">
+							<header>
+								<Wallet size={17} />
+								<h2>模拟持仓</h2>
+								<span className="trading-subtle">现价刷新自最近一次行情请求</span>
+							</header>
 							<div className="trading-table-wrap">
 								<table className="trading-table">
 									<thead>
-										<tr>
-											<th>标的</th><th>方向</th><th>数量</th><th>限价</th><th>止损</th><th>目标权重</th><th>状态</th><th>依据 / 拒绝原因</th>
-										</tr>
+										<tr><th>标的</th><th>数量</th><th>可卖 / 冻结</th><th>成本</th><th>现价</th><th>浮动盈亏</th><th>防守线</th><th>操作</th></tr>
 									</thead>
 									<tbody>
-										{activeOrders.length === 0 && (
-											<tr><td colSpan={8} className="trading-empty-cell">本次没有可执行建议</td></tr>
+										{(!account || (account.positions ?? []).length === 0) && (
+											<tr><td colSpan={8} className="trading-empty-cell">当前空仓</td></tr>
 										)}
-										{activeOrders.map((order) => (
-											<tr key={order.id} className={order.status}>
-												<td><strong>{order.symbol}</strong><span>{order.name}</span></td>
-												<td className={order.side === 'buy' ? 'up' : 'down'}>{order.side === 'buy' ? '买入' : '卖出'}</td>
-												<td>{order.quantity} 股</td>
-												<td>{order.order_type === 'limit' ? order.limit_price.toFixed(2) : '市价'}</td>
-												<td>{order.stop_loss_price ? order.stop_loss_price.toFixed(2) : '—'}</td>
-												<td>{order.target_weight_percent ? `${order.target_weight_percent.toFixed(1)}%` : '—'}</td>
-												<td><span className={`trading-order-status ${order.status}`}>{tradeOrderStatusText[order.status]}</span></td>
-												<td className="trading-cell-note">{order.status === 'rejected' ? order.reject_reason : order.thesis || '—'}</td>
-											</tr>
-										))}
+										{account?.positions.map((position) => {
+											const sellable = position.available_quantity - (position.reserved_quantity ?? 0);
+											const profitPercent = position.average_cost > 0 ? ((position.last_price / position.average_cost - 1) * 100) : 0;
+											const editing = protection?.symbol === position.symbol;
+											return (
+												<Fragment key={position.symbol}>
+													<tr>
+														<td><strong>{position.symbol}</strong><span>{position.name}{position.sector ? ` · ${position.sector}` : ''}</span></td>
+														<td>{position.quantity} 股</td>
+														<td>
+															{sellable} 股
+															{(position.reserved_quantity ?? 0) > 0 && <span className="trading-subtle">（挂单 {position.reserved_quantity}）</span>}
+														</td>
+														<td>{position.average_cost.toFixed(3)}</td>
+														<td>{position.last_price.toFixed(2)}</td>
+														<td className={profitPercent >= 0 ? 'up' : 'down'}>
+															{position.unrealized_pnl >= 0 ? '+' : ''}{formatMoney(position.unrealized_pnl)}
+															<span className="trading-subtle">{profitPercent >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%</span>
+														</td>
+														<td>
+															{position.stop_loss_price ? <span className="trading-line stop">{position.stop_loss_price.toFixed(2)}</span> : <span className="trading-line none">未设止损</span>}
+															{position.take_profit_price ? <span className="trading-line take">{position.take_profit_price.toFixed(2)}</span> : null}
+															{(position.reduce_count ?? 0) > 0 && <span className="trading-subtle">已止盈 {position.reduce_count} 级</span>}
+															{/* 失效条件与预期期限写在持仓上：它们是「这笔单什么时候算错」的承诺，
+															    比止损更容易被遗忘，因为它不是一个价格。 */}
+															{position.invalidation_rule?.price_below || position.invalidation ? (
+																<span className="trading-subtle" title={position.invalidation ?? ''}>
+																	失效 {position.invalidation_rule?.price_below ? `跌破 ${position.invalidation_rule.price_below.toFixed(2)}` : (position.invalidation ?? '').slice(0, 18)}
+																</span>
+															) : null}
+															{position.expected_days ? <span className="trading-subtle">预期 {position.expected_days} 日</span> : null}
+															{/* 入场置信度与建仓环境：复盘时回答「当时多有把握」，
+															    它比买入理由更客观——理由是叙述，置信度是当时的数字。 */}
+															{position.entry_confidence ? (
+																<span className="trading-subtle" title={position.entry_regime ? `建仓环境：${position.entry_regime}` : ''}>
+																	入场置信 {position.entry_confidence.toFixed(2)}
+																</span>
+															) : null}
+															{/* 复核轮次：证明这笔仓位不是买入后没人再看 */}
+															{position.review_count ? <span className="trading-subtle">已复核 {position.review_count} 轮</span> : null}
+															{position.auto_reduce_at ? <span className="trading-chip">已自动减仓一次</span> : null}
+														</td>
+														<td>
+															<button type="button" className="trading-link" onClick={() => setProtection({
+																symbol: position.symbol,
+																stop: position.stop_loss_price ? String(position.stop_loss_price) : '',
+																takeProfit: position.take_profit_price ? String(position.take_profit_price) : '',
+															})}>
+																{editing ? '编辑中' : '改防守线'}
+															</button>
+															<button type="button" className="trading-link" onClick={() => setWatchlist((current) => (current ? `${current}, ${position.symbol}` : position.symbol))}>
+																加入关注池
+															</button>
+														</td>
+													</tr>
+													{editing && (
+														<tr className="trading-protection-row">
+															<td colSpan={8}>
+																<div className="trading-protection-form">
+																	<strong>{position.symbol} 防守线</strong>
+																	<label>止损价
+																		<input type="number" step="0.01" min="0" value={protection.stop}
+																			onChange={(event) => setProtection({ ...protection, stop: event.target.value })} />
+																	</label>
+																	<label>止盈价
+																		<input type="number" step="0.01" min="0" value={protection.takeProfit}
+																			onChange={(event) => setProtection({ ...protection, takeProfit: event.target.value })} />
+																	</label>
+																	<button type="button" className="trading-primary" onClick={() => void handleSaveProtection()}>保存</button>
+																	<button type="button" className="trading-link" onClick={() => setProtection(null)}>取消</button>
+																	<span className="trading-subtle">填 0 表示不设该防线；止损由系统每轮自动执行，不等模型同意。</span>
+																</div>
+															</td>
+														</tr>
+													)}
+												</Fragment>
+											);
+										})}
 									</tbody>
 								</table>
 							</div>
-							{rejectedOrders.length > 0 && (
-								<p className="trading-hint warn">
-									{rejectedOrders.length} 笔建议被风控拒绝，说明模型给出的方向未通过仓位、止损或标的白名单校验，不会进入撮合。
-								</p>
-							)}
-						</>
-					)}
-				</main>
+						</section>
+
+						{active && pendingOrders.length > 0 && (
+							<section className="trading-panel">
+								<header><RefreshCw size={17} /><h2>挂单</h2><span className="trading-subtle">限价未触及前保持挂起</span></header>
+								<div className="trading-pending">
+									{pendingOrders.map((order) => (
+										<PendingOrder key={order.id} order={order} onCancel={async () => {
+											if (!config) return;
+											try {
+												await cancelTradeOrder(config, order.id);
+												setMessage('订单已撤销');
+												await loadPlans();
+											} catch (cause) {
+												setError(cause instanceof Error ? cause.message : '撤销失败');
+											}
+										}} />
+									))}
+								</div>
+							</section>
+						)}
+					</>
+				)}
+
+				{activeView === 'plans' && (
+					<section className="trading-panel">
+						<header><Sparkles size={17} /><h2>历史计划</h2><span className="trading-subtle">最近 10 份</span></header>
+						<ul className="trading-history">
+							{plans.length === 0 && <li className="trading-empty">暂无历史计划</li>}
+							{plans.map((plan) => (
+								<li key={plan.id}>
+									<button type="button" className={active?.id === plan.id ? 'active' : ''} onClick={async () => {
+										if (!config) return;
+										try {
+											setActive(await fetchTradePlan(config, plan.id));
+										} catch (cause) {
+											setError(cause instanceof Error ? cause.message : '读取计划失败');
+										}
+									}}>
+										<strong>{plan.regime || '未标注'}</strong>
+										<span>{new Date(plan.created_at).toLocaleString('zh-CN')}</span>
+										<em className={`trading-status ${plan.status}`}>{tradePlanStatusText[plan.status]}</em>
+										<small>{(plan.orders ?? []).length} 笔 · {plan.summary?.slice(0, 40) || plan.error || '—'}</small>
+									</button>
+								</li>
+							))}
+						</ul>
+					</section>
+				)}
+
+				{activeView === 'autopilot' && (
+					<>
+						<AutopilotPanel
+							status={autopilot}
+							busy={autopilotBusy}
+							cycleBusy={cycleBusy}
+							onConfigure={(patch) => void handleAutopilot(patch)}
+							onRun={() => void handleRunCycle()}
+							onResetBreaker={() => void handleResetBreaker()}
+							onReleaseDrawdown={() => void handleReleaseDrawdown()}
+						/>
+						<CycleLog cycles={cycles} config={config} onOpenPlan={(planId) => void openPlanById(planId)} />
+					</>
+				)}
+
+				{activeView === 'timeline' && (
+					<TimelinePanel
+						day={timelineDay}
+						timeline={timeline}
+						loading={timelineLoading}
+						onChangeDay={setTimelineDay}
+						onRefresh={() => void loadTimeline(timelineDay)}
+					/>
+				)}
+
+				{activeView === 'performance' && (
+					<>
+						<PerformancePanel performance={performance} onRefresh={() => void loadReview()} />
+						<CalibrationPanel report={calibration} />
+					</>
+				)}
+
+				{activeView === 'review' && (
+					<ReviewPanel
+						review={reviews[0] ?? null}
+						history={reviews}
+						trades={closedTrades}
+						busy={reviewBusy}
+						onRun={() => void handleRunReview()}
+						onRunProtective={() => void handleRunProtective()}
+					/>
+				)}
+
+				{activeView === 'memory' && (
+					<MemoryPanel
+						memories={memories}
+						busy={memoryBusy}
+						onSync={() => void handleSyncMemory()}
+					/>
+				)}
+
+				{activeView === 'ops' && (
+					<>
+						<AlertPanel
+							alerts={alerts}
+							health={health}
+							testing={alertTesting}
+							onTest={() => void handleTestAlert()}
+							onRefresh={() => void loadOps()}
+						/>
+						<OpsLog events={events} onRefresh={() => void loadOps()} />
+					</>
+				)}
 			</div>
-
-			<section className="trading-panel">
-				<header>
-					<Wallet size={17} />
-					<h2>模拟持仓</h2>
-					<span className="trading-subtle">现价刷新自最近一次行情请求</span>
-				</header>
-				<div className="trading-table-wrap">
-					<table className="trading-table">
-						<thead>
-							<tr><th>标的</th><th>数量</th><th>可卖 / 冻结</th><th>成本</th><th>现价</th><th>浮动盈亏</th><th>防守线</th><th>操作</th></tr>
-						</thead>
-						<tbody>
-							{(!account || (account.positions ?? []).length === 0) && (
-								<tr><td colSpan={8} className="trading-empty-cell">当前空仓</td></tr>
-							)}
-							{account?.positions.map((position) => {
-								const sellable = position.available_quantity - (position.reserved_quantity ?? 0);
-								const profitPercent = position.average_cost > 0 ? ((position.last_price / position.average_cost - 1) * 100) : 0;
-								const editing = protection?.symbol === position.symbol;
-								return (
-									<Fragment key={position.symbol}>
-										<tr>
-											<td><strong>{position.symbol}</strong><span>{position.name}{position.sector ? ` · ${position.sector}` : ''}</span></td>
-											<td>{position.quantity} 股</td>
-											<td>
-												{sellable} 股
-												{(position.reserved_quantity ?? 0) > 0 && <span className="trading-subtle">（挂单 {position.reserved_quantity}）</span>}
-											</td>
-											<td>{position.average_cost.toFixed(3)}</td>
-											<td>{position.last_price.toFixed(2)}</td>
-											<td className={profitPercent >= 0 ? 'up' : 'down'}>
-												{position.unrealized_pnl >= 0 ? '+' : ''}{formatMoney(position.unrealized_pnl)}
-												<span className="trading-subtle">{profitPercent >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%</span>
-											</td>
-											<td>
-												{position.stop_loss_price ? <span className="trading-line stop">{position.stop_loss_price.toFixed(2)}</span> : <span className="trading-line none">未设止损</span>}
-												{position.take_profit_price ? <span className="trading-line take">{position.take_profit_price.toFixed(2)}</span> : null}
-												{(position.reduce_count ?? 0) > 0 && <span className="trading-subtle">已止盈 {position.reduce_count} 级</span>}
-												{/* 失效条件与预期期限写在持仓上：它们是「这笔单什么时候算错」的承诺，
-												    比止损更容易被遗忘，因为它不是一个价格。 */}
-												{position.invalidation_rule?.price_below || position.invalidation ? (
-													<span className="trading-subtle" title={position.invalidation ?? ''}>
-														失效 {position.invalidation_rule?.price_below ? `跌破 ${position.invalidation_rule.price_below.toFixed(2)}` : (position.invalidation ?? '').slice(0, 18)}
-													</span>
-												) : null}
-												{position.expected_days ? <span className="trading-subtle">预期 {position.expected_days} 日</span> : null}
-												{/* 入场置信度与建仓环境：复盘时回答「当时多有把握」，
-												    它比买入理由更客观——理由是叙述，置信度是当时的数字。 */}
-												{position.entry_confidence ? (
-													<span className="trading-subtle" title={position.entry_regime ? `建仓环境：${position.entry_regime}` : ''}>
-														入场置信 {position.entry_confidence.toFixed(2)}
-													</span>
-												) : null}
-												{/* 复核轮次：证明这笔仓位不是买入后没人再看 */}
-												{position.review_count ? <span className="trading-subtle">已复核 {position.review_count} 轮</span> : null}
-												{position.auto_reduce_at ? <span className="trading-chip">已自动减仓一次</span> : null}
-											</td>
-											<td>
-												<button type="button" className="trading-link" onClick={() => setProtection({
-													symbol: position.symbol,
-													stop: position.stop_loss_price ? String(position.stop_loss_price) : '',
-													takeProfit: position.take_profit_price ? String(position.take_profit_price) : '',
-												})}>
-													{editing ? '编辑中' : '改防守线'}
-												</button>
-												<button type="button" className="trading-link" onClick={() => setWatchlist((current) => (current ? `${current}, ${position.symbol}` : position.symbol))}>
-													加入关注池
-												</button>
-											</td>
-										</tr>
-										{editing && (
-											<tr className="trading-protection-row">
-												<td colSpan={8}>
-													<div className="trading-protection-form">
-														<strong>{position.symbol} 防守线</strong>
-														<label>止损价
-															<input type="number" step="0.01" min="0" value={protection.stop}
-																onChange={(event) => setProtection({ ...protection, stop: event.target.value })} />
-														</label>
-														<label>止盈价
-															<input type="number" step="0.01" min="0" value={protection.takeProfit}
-																onChange={(event) => setProtection({ ...protection, takeProfit: event.target.value })} />
-														</label>
-														<button type="button" className="trading-primary" onClick={() => void handleSaveProtection()}>保存</button>
-														<button type="button" className="trading-link" onClick={() => setProtection(null)}>取消</button>
-														<span className="trading-subtle">填 0 表示不设该防线；止损由系统每轮自动执行，不等模型同意。</span>
-													</div>
-												</td>
-											</tr>
-										)}
-									</Fragment>
-								);
-							})}
-						</tbody>
-					</table>
-				</div>
-			</section>
-
-			{active && pendingOrders.length > 0 && (
-				<section className="trading-panel">
-					<header><RefreshCw size={17} /><h2>挂单</h2><span className="trading-subtle">限价未触及前保持挂起</span></header>
-					<div className="trading-pending">
-						{pendingOrders.map((order) => (
-							<PendingOrder key={order.id} order={order} onCancel={async () => {
-								if (!config) return;
-								try {
-									await cancelTradeOrder(config, order.id);
-									setMessage('订单已撤销');
-									await loadPlans();
-								} catch (cause) {
-									setError(cause instanceof Error ? cause.message : '撤销失败');
-								}
-							}} />
-						))}
-					</div>
-				</section>
-			)}
-
-			<section className="trading-panel">
-				<header><Sparkles size={17} /><h2>历史计划</h2><span className="trading-subtle">最近 10 份</span></header>
-				<ul className="trading-history">
-					{plans.length === 0 && <li className="trading-empty">暂无历史计划</li>}
-					{plans.map((plan) => (
-						<li key={plan.id}>
-							<button type="button" className={active?.id === plan.id ? 'active' : ''} onClick={async () => {
-								if (!config) return;
-								try {
-									setActive(await fetchTradePlan(config, plan.id));
-								} catch (cause) {
-									setError(cause instanceof Error ? cause.message : '读取计划失败');
-								}
-							}}>
-								<strong>{plan.regime || '未标注'}</strong>
-								<span>{new Date(plan.created_at).toLocaleString('zh-CN')}</span>
-								<em className={`trading-status ${plan.status}`}>{tradePlanStatusText[plan.status]}</em>
-								<small>{(plan.orders ?? []).length} 笔 · {plan.summary?.slice(0, 40) || plan.error || '—'}</small>
-							</button>
-						</li>
-					))}
-				</ul>
-			</section>
-
-			<PerformancePanel performance={performance} onRefresh={() => void loadReview()} />
-
-			<CalibrationPanel report={calibration} />
-
-			<ReviewPanel
-				review={reviews[0] ?? null}
-				history={reviews}
-				trades={closedTrades}
-				busy={reviewBusy}
-				onRun={() => void handleRunReview()}
-				onRunProtective={() => void handleRunProtective()}
-			/>
-
-			<MemoryPanel
-				memories={memories}
-				busy={memoryBusy}
-				onSync={() => void handleSyncMemory()}
-			/>
-
-			<CycleLog cycles={cycles} config={config} onOpenPlan={(planId) => void openPlanById(planId)} />
-
-			<TimelinePanel
-				day={timelineDay}
-				timeline={timeline}
-				loading={timelineLoading}
-				onChangeDay={setTimelineDay}
-				onRefresh={() => void loadTimeline(timelineDay)}
-			/>
-
-			<AlertPanel
-				alerts={alerts}
-				health={health}
-				testing={alertTesting}
-				onTest={() => void handleTestAlert()}
-				onRefresh={() => void loadOps()}
-			/>
-
-			<OpsLog events={events} onRefresh={() => void loadOps()} />
 		</section>
 	);
 }
@@ -2749,6 +2970,19 @@ function alertStatusText(status: TradeAlertRecord['status']): string {
 }
 
 // uptimeText 把秒数说成人话。长时间运行的秒数（如 18732）对人没有意义。
+/** 健康状态的中文口径：warning 表示有降级项但不影响成交，critical 才需要立即处理。 */
+function healthLabel(status: 'healthy' | 'warning' | 'critical'): string {
+	return status === 'healthy' ? '正常' : status === 'warning' ? '注意' : '异常';
+}
+
+/** 只取时分：状态条里说「下一轮 14:36」，不需要日期。 */
+function clockText(value?: string): string {
+	if (!value) return '—';
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return '—';
+	return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
 function uptimeText(seconds: number): string {
 	if (!Number.isFinite(seconds) || seconds <= 0) return '刚刚启动';
 	if (seconds < 60) return `${Math.round(seconds)} 秒`;
