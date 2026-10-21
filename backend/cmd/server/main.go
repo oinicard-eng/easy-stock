@@ -24,6 +24,18 @@ func main() {
 	if addr == "" {
 		addr = "127.0.0.1:20081"
 	}
+	// TradingOnly 把同一个可执行文件变成独立的 AI交易员程序：
+	// 路由表只留交易与设置，调度器只跑交易自动循环。
+	// 部署目标机器上只需要：本程序 + trading.db + 一份环境变量
+	// （QuantMind 的局域网地址与账号密码见 deploy/trading-standalone.env.example）。
+	tradingOnly := func() bool {
+		switch strings.TrimSpace(strings.ToLower(os.Getenv("A_STOCK_TRADING_ONLY"))) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	}()
 	reviewDBPath := os.Getenv("A_STOCK_REVIEW_DB")
 	portfolioDBPath := os.Getenv("A_STOCK_PORTFOLIO_DB")
 	stockResearchDBPath := os.Getenv("A_STOCK_RESEARCH_DB")
@@ -133,6 +145,7 @@ func main() {
 	}
 	server := httpapi.NewServer(httpapi.Config{
 		Token:                    os.Getenv("A_STOCK_TOKEN"),
+		TradingOnly:              tradingOnly,
 		QuantMind:                quantMindKLine,
 		ReviewDBPath:             reviewDBPath,
 		PortfolioDBPath:          portfolioDBPath,
@@ -159,16 +172,21 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	go server.RunReviewScheduler(ctx)
-	go server.RunDailySummaryScheduler(ctx)
-	go server.RunRemoteDailyReviewScheduler(ctx)
-	go server.RunMarketEmotionScheduler(ctx)
-	go server.RunSectorFlowSampler(ctx)
-	go server.RunMasteryScheduler(ctx)
-	go server.RunPortfolioScheduler(ctx)
+	// 独立 AI交易员模式（A_STOCK_TRADING_ONLY=1）只跑交易自动循环；
+	// 其余调度器服务的是研究侧模块，独立模式下它们的路由都没有注册，
+	// 起了也是空转，还平白制造对研究侧上游的周期性请求。
 	go server.RunTradingAutopilot(ctx)
-	go server.RunCockpitPatrol(ctx)
-	go server.RunThemeLibraryDailyRefresh(ctx)
+	if !tradingOnly {
+		go server.RunReviewScheduler(ctx)
+		go server.RunDailySummaryScheduler(ctx)
+		go server.RunRemoteDailyReviewScheduler(ctx)
+		go server.RunMarketEmotionScheduler(ctx)
+		go server.RunSectorFlowSampler(ctx)
+		go server.RunMasteryScheduler(ctx)
+		go server.RunPortfolioScheduler(ctx)
+		go server.RunCockpitPatrol(ctx)
+		go server.RunThemeLibraryDailyRefresh(ctx)
+	}
 	httpServer := &http.Server{Addr: addr, Handler: server}
 	go func() {
 		<-ctx.Done()
@@ -176,6 +194,9 @@ func main() {
 		defer shutdownCancel()
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
+	if tradingOnly {
+		log.Printf("event=trading_only mode=standalone note=AI交易员独立模式：仅交易与设置路由，研究侧不加载")
+	}
 	log.Printf("easy-stock data foundation listening on http://%s", addr)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)

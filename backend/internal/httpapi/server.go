@@ -96,6 +96,7 @@ type Server struct {
 	portfolioExpectation     *portfolioinspection.ExpectationService
 	trading                  *trading.Service
 	tradingStore             *trading.Store
+	tradingOnly              bool
 	autopilot                *trading.Autopilot
 	alertManager             *trading.AlertManager
 	stockResearchStore       *stockanalysis.ResearchStore
@@ -139,6 +140,20 @@ func eastMoneyDesktopOptions() []eastmoney.Option {
 
 func NewServer(config any) *Server {
 	cfg := normalizeConfig(config)
+	if cfg.TradingOnly {
+		// 独立 AI交易员模式：研究侧的持久化一律退化为内存实例。
+		// 空路径在各个 OpenStore 里都定义为「开内存库」，所以这里
+		// 只需要把路径清空，不需要逐个特判；主题雷达/题材库/板块采样
+		// 本来就以「路径为空则跳过」为约定，清空即关闭。
+		cfg.ReviewDBPath = ""
+		cfg.PortfolioDBPath = ""
+		cfg.StockResearchDBPath = ""
+		cfg.MarketEmotionDBPath = ""
+		cfg.ThemeRadarDBPath = ""
+		cfg.ThemeLibraryDBPath = ""
+		cfg.SectorFlowSampleDBPath = ""
+		cfg.RemoteDailyReviewURL = ""
+	}
 	tokenUsage := newTokenUsageStore(cfg.SettingsPath)
 	if cfg.Logger == nil {
 		cfg.Logger = log.Default()
@@ -492,6 +507,7 @@ func NewServer(config any) *Server {
 		return s.notificationSender.Send(ctx, channel, cfg, message)
 	}, func() appsettings.Notifications { return s.settingsStore.Snapshot().Notifications }, cfg.Logger)
 	s.tradingStore = cfg.TradingStore
+	s.tradingOnly = cfg.TradingOnly
 	if s.tradingStore != nil {
 		s.trading = trading.NewService(cfg.TradingStore, usageGateway, s.realtimeProvider, s.stockDirectory, cfg.Logger)
 		// 实盘通道门控：地址与令牌齐全才启用，缺任何一项都留在模拟盘并明确记日志。
@@ -783,7 +799,10 @@ func (s *Server) refreshMasterySnapshot(ctx context.Context, force bool) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.health)
 	s.mux.HandleFunc("GET /api/v1/sources", s.sources)
-	s.mux.HandleFunc("GET /api/v1/quotes/realtime", s.realtime)
+	if !s.tradingOnly {
+		// 行情总览 / 复盘 / 组合检视等研究侧路由：独立 AI交易员模式下不注册，
+		// 让「这个进程能做什么」由路由表直接声明，而不是靠没人去调它。
+		s.mux.HandleFunc("GET /api/v1/quotes/realtime", s.realtime)
 	s.mux.HandleFunc("GET /api/v1/quotes/kline", s.kline)
 	s.mux.HandleFunc("GET /api/v1/quotes/kline/batch", s.klineBatch)
 	s.mux.HandleFunc("GET /api/v1/market/news", s.news)
@@ -853,6 +872,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/portfolio-inspections/{id}/resume", s.portfolioInspectionResume)
 	s.mux.HandleFunc("POST /api/v1/portfolio-inspections/{id}/bind-plan", s.portfolioInspectionBindPlan)
 	s.mux.HandleFunc("POST /api/v1/portfolio-inspections/{id}/cancel", s.portfolioInspectionCancel)
+	}
+	// 交易路由：独立模式的全部业务面，全功能模式下与其他模块并列。
 	s.mux.HandleFunc("GET /api/v1/trading/account", s.tradingAccount)
 	s.mux.HandleFunc("POST /api/v1/trading/account/reset", s.tradingResetAccount)
 	s.mux.HandleFunc("GET /api/v1/trading/market", s.tradingMarket)
@@ -901,7 +922,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/trading/plans/{id}/sandbox", s.tradingPlanSandbox)
 	s.mux.HandleFunc("POST /api/v1/trading/match", s.tradingMatchPending)
 	s.mux.HandleFunc("POST /api/v1/trading/orders/{id}/cancel", s.tradingOrderCancel)
-	s.mux.HandleFunc("POST /api/v1/reviews/portfolio-expectations", s.portfolioExpectationCreate)
+	if !s.tradingOnly {
+		s.mux.HandleFunc("POST /api/v1/reviews/portfolio-expectations", s.portfolioExpectationCreate)
 	s.mux.HandleFunc("GET /api/v1/reviews/portfolio-expectations/latest", s.portfolioExpectationLatest)
 	s.mux.HandleFunc("GET /api/v1/reviews/portfolio-expectations/{id}", s.portfolioExpectationGet)
 	s.mux.HandleFunc("GET /api/v1/reviews/sources", s.reviewSources)
@@ -929,6 +951,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/reviews/posts/{id}/analyze", s.reviewAnalyzePost)
 	s.mux.HandleFunc("GET /api/v1/reviews/remote-daily/status", s.reviewRemoteDailyStatus)
 	s.mux.HandleFunc("POST /api/v1/reviews/remote-daily/sync", s.reviewRemoteDailySync)
+	}
+	// 设置与 LLM 配置路由：独立模式也保留——换大脑、配模型档位
+	// 是运维 AI交易员本身的动作，不是研究侧功能。
 	s.mux.HandleFunc("GET /api/v1/settings", s.settingsGet)
 	s.mux.HandleFunc("GET /api/v1/settings/token-usage", s.tokenUsageSummary)
 	s.mux.HandleFunc("GET /api/v1/settings/token-usage/calls", s.tokenUsageCalls)
@@ -948,15 +973,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/settings/notifications", s.settingsNotificationsUpdate)
 	s.mux.HandleFunc("POST /api/v1/settings/notifications/reveal", s.settingsNotificationsReveal)
 	s.mux.HandleFunc("POST /api/v1/settings/notifications/test", s.settingsNotificationsTest)
-	s.mux.HandleFunc("GET /api/v1/ai/ws", s.aiChatWebSocket)
-	s.mux.HandleFunc("POST /api/v1/strategy/inflections/evaluate", s.inflectionEvaluate)
-	s.mux.HandleFunc("GET /api/v1/cockpit/status", s.cockpitStatus)
-	s.mux.HandleFunc("GET /api/v1/cockpit/facts", s.cockpitFacts)
-	s.mux.HandleFunc("GET /api/v1/cockpit/briefs", s.cockpitBriefs)
-	s.mux.HandleFunc("GET /api/v1/cockpit/briefs/{id}", s.cockpitBrief)
-	s.mux.HandleFunc("POST /api/v1/cockpit/briefs", s.cockpitRun)
-	s.mux.HandleFunc("POST /api/v1/cockpit/auto-patrol", s.cockpitAutoPatrol)
-	s.mux.HandleFunc("GET /api/v1/ws/stream", s.stream)
+	if !s.tradingOnly {
+		s.mux.HandleFunc("GET /api/v1/ai/ws", s.aiChatWebSocket)
+		s.mux.HandleFunc("POST /api/v1/strategy/inflections/evaluate", s.inflectionEvaluate)
+		s.mux.HandleFunc("GET /api/v1/cockpit/status", s.cockpitStatus)
+		s.mux.HandleFunc("GET /api/v1/cockpit/facts", s.cockpitFacts)
+		s.mux.HandleFunc("GET /api/v1/cockpit/briefs", s.cockpitBriefs)
+		s.mux.HandleFunc("GET /api/v1/cockpit/briefs/{id}", s.cockpitBrief)
+		s.mux.HandleFunc("POST /api/v1/cockpit/briefs", s.cockpitRun)
+		s.mux.HandleFunc("POST /api/v1/cockpit/auto-patrol", s.cockpitAutoPatrol)
+		s.mux.HandleFunc("GET /api/v1/ws/stream", s.stream)
+	}
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

@@ -227,8 +227,13 @@ type Config struct {
 	// TradingAlert 是告警外发配置。零值表示不配任何出口：
 	// 事件照常落库，但不会离开这台机器。这是刻意的默认——
 	// 本地开发和跑测试都不该因为没填 webhook 就报错。
-	TradingAlert         trading.AlertConfig
-	MarketEmotionStore   *marketemotion.Store
+	TradingAlert trading.AlertConfig
+	// TradingOnly 把服务裁剪成独立的 AI交易员程序：只挂交易与设置路由，
+	// 行情/复盘/组合等研究侧路由与调度器全部不注册，研究侧的库退化为
+	// 内存实例。部署形态是「一个可执行文件 + 一份环境变量」：
+	// 数据来源指向局域网 QuantMind（URL+账号密码），账本只落本地 trading.db。
+	TradingOnly           bool
+	MarketEmotionStore    *marketemotion.Store
 	ReviewImporter       ReviewImporter
 	SettingsPath         string
 	SettingsStore        *appsettings.Store
